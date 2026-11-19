@@ -1281,22 +1281,43 @@ async def ek_load(force: bool = False) -> dict:
     # Klasifikační skupiny (např. 1A1, 1A2): [{PkKlasSkupina, Zkratka, EvSkupina, Zaci: [{PkZak}…]}].
     # Starý sync bral zkratku skupiny jako „studijní skupinu“ studenta (přepíše třídu).
     gmap, by_zak = {}, {}
-    for g in res.get("skupiny") or []:
-        gid = g.get("PkKlasSkupina")
-        if gid is None:
-            continue
-        members = [(m.get("PkZak") if isinstance(m, dict) else m) for m in (g.get("Zaci") or [])]
-        gmap[gid] = {**{k: v for k, v in g.items() if k != "Zaci"}, "PocetZaku": len(members)}
+
+    def ci(d, *names):  # klíč bez ohledu na velikost písmen
+        low = {str(k).lower(): v for k, v in d.items()}
+        return next((low[n.lower()] for n in names if n.lower() in low), None)
+
+    def member_id(m):
+        if isinstance(m, dict):
+            v = ci(m, "PkZak", "IdZak", "ZakId", "PersonId", "Id")
+            if v is None:
+                v = next((x for k, x in m.items() if "zak" in str(k).lower() and not isinstance(x, (dict, list))), None)
+            return v
+        return m
+
+    skup = res.get("skupiny") or []
+    for i, g in enumerate(skup):
+        gid = ci(g, "PkKlasSkupina", "PkSkupina", "Id")
+        gid = str(gid if gid is not None else f"#{i}")
+        mem_key = next((k for k, v in g.items() if isinstance(v, list)), None)
+        members = [member_id(m) for m in (g.get(mem_key) or [])] if mem_key else []
+        info = {k: v for k, v in g.items() if k != mem_key}
+        info.setdefault("Zkratka", ci(g, "Zkratka", "Nazev", "Name"))
+        gmap[gid] = {**info, "PocetZaku": len(members)}
         for zid in members:
             if zid is not None:
-                by_zak.setdefault(zid, []).append(gid)
+                by_zak.setdefault(str(zid), []).append(gid)
+    if res.get("skupiny") is not None:
+        sample = skup[0] if skup else {}
+        print(f"[edookit] skupiny: {len(skup)}, žáků ve skupinách: {len(by_zak)}, pole skupiny: {list(sample)}"
+              f"{', první člen: ' + repr((sample.get(next((k for k, v in sample.items() if isinstance(v, list)), ''), []) or [None])[0])[:200] if sample else ''}",
+              flush=True)
     zmap = {z.get("PkZak"): z for z in zaci or []}
     pmap = {}
     rows = []
 
     def make(pid, p, z):
         t = tmap.get((z or {}).get("PkTrida"))
-        gids = by_zak.get(pid, [])
+        gids = by_zak.get(str(pid), []) or by_zak.get(str((z or {}).get("PkZak")), [])
         groups = sorted({str(gmap[g].get("Zkratka")) for g in gids if gmap[g].get("Zkratka")})
         klass = (p or {}).get("ClassName") or (t or {}).get("Zkratka")
         roc = (t or {}).get("Rocnik")
@@ -1337,7 +1358,12 @@ async def ek_load(force: bool = False) -> dict:
 @app.get("/api/edookit/students")
 async def ek_students(refresh: bool = False, _: str = Depends(admin)):
     d = await ek_load(force=refresh)
+    gs = d.get("skupiny") or {}
+    sample = next(iter(gs.values()), None)
+    gstat = {"groups": len(gs), "students_in_groups": sum(1 for r in d["rows"] if r.get("groups")),
+             "fields": list(sample)[:12] if sample else []}
     return {"count": len(d["rows"]), "sources": d["sources"], "warnings": d["warnings"], "loaded": d["loaded"],
+            "group_stats": gstat,
             "students": d["rows"]}
 
 
@@ -1354,7 +1380,7 @@ async def ek_student(sid: str, _: str = Depends(admin)):
         {"title": "API Docházka – žák (/api/dochazka/v2/zaci)", "data": ek_scrub(z) if z else None},
         {"title": "API Docházka – třída (/api/dochazka/v2/tridy)", "data": t},
         {"title": "API Docházka – skupiny žáka (/api/dochazka/v2/klas-skupiny)",
-         "data": {str(d["skupiny"][g].get("Zkratka") or g): d["skupiny"][g] for g in d["by_zak"].get(key, [])} or None},
+         "data": {str(d["skupiny"][g].get("Zkratka") or g): d["skupiny"][g] for g in d["by_zak"].get(str(key), [])} or None},
     ]}
 
 

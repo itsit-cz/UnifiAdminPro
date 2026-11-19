@@ -941,6 +941,8 @@ async function loadStudents(refresh = false) {
     fill('#eGroup', 'Všechny skupiny', [...new Set(STUDENTS.flatMap(s => s.groups || []))].sort(num));
     const src = {personal: 'osobní údaje', zaci: 'žáci (Docházka)', tridy: 'třídy', skupiny: 'skupiny'};
     $('#eInfo').textContent = `Načteno ${r.count} studentů · zdroje: ${r.sources.map(x => src[x] || x).join(', ')} · ${new Date(r.loaded).toLocaleTimeString('cs-CZ')}` +
+      (r.group_stats && r.sources.includes('skupiny') ? ` · skupin ${r.group_stats.groups}, studentů se skupinou ${r.group_stats.students_in_groups}` +
+        (r.group_stats.students_in_groups ? '' : ` (pole skupiny: ${r.group_stats.fields.join(', ') || '—'})`) : '') +
       (r.warnings.length ? ` · ⚠ ${r.warnings.join('; ')}` : '') + ' · data se neukládají (jen dočasně v paměti).';
     renderStudents();
   } catch (e) { $('#eInfo').textContent = '❌ ' + e.message; }
