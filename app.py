@@ -424,7 +424,10 @@ async def test_conn(host, token, wg):
             steps.append({"ok": False, "text": f"Na {host} neodpovídá UniFi Access API (HTTP {r.status_code}) – je to správná konzole?"})
             return {"ok": False, "steps": steps}
         if body.get("code") != "SUCCESS":
-            steps.append({"ok": False, "text": f"API token odmítnut: {body.get('code')} – {body.get('msg')}"})
+            hint = (" – token nemá potřebná oprávnění. Vytvořte nový v Access → Settings → General → API Token "
+                    "s oprávněními view/edit pro User, Access Policy, Door/Location a System Log."
+                    if body.get("code") == "CODE_UNAUTHORIZED" else "")
+            steps.append({"ok": False, "text": f"API token odmítnut: {body.get('code')} – {body.get('msg')}{hint}"})
             return {"ok": False, "steps": steps}
         steps.append({"ok": True, "text": "API token je platný (čtení uživatelů)"})
         return {"ok": True, "steps": steps, "cert_sha256": fp,
