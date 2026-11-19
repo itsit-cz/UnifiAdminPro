@@ -487,8 +487,10 @@ async function closeUser() { if (ENR) await cancelEnroll(); udlg.close(); }
 udlg.addEventListener('cancel', () => { if (ENR) cancelEnroll(); });
 
 const saveInfo = () => run(async () => {
-  await api('PUT', `/api/users/${CUR.id}`, {first_name: $('#uFirst').value, last_name: $('#uLast').value,
-    user_email: $('#uEmail').value, employee_number: CUR.employee_number || ''});
+  const want = {first_name: $('#uFirst').value.trim(), last_name: $('#uLast').value.trim(), user_email: $('#uEmail').value.trim()};
+  const body = Object.fromEntries(Object.entries(want).filter(([k, v]) => v !== (CUR[k] || '')));
+  if (!Object.keys(body).length) throw new Error('Nic se nezměnilo');
+  await api('PUT', `/api/users/${CUR.id}`, body);
   await reloadUser();
 }, 'Údaje uloženy');
 const saveRole = () => run(async () => {
