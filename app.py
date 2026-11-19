@@ -11,7 +11,12 @@ import os
 import secrets
 import socket
 import subprocess
+import tempfile
+import threading
 import time
+import traceback
+import urllib.request
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +33,7 @@ DATA = Path(os.environ.get("DATA_DIR", "/app/data"))
 KEYS = Path(os.environ.get("KEYS_DIR", "/app/keys"))
 WIREPROXY = os.environ.get("WIREPROXY_BIN", "wireproxy")
 WG_PORT = int(os.environ.get("WG_PROXY_PORT", "25345"))
+WG_INFO_PORT = WG_PORT + 1
 CONFIG = DATA / "config.json"
 AUDIT_FILE = DATA / "audit.jsonl"
 DATA.mkdir(parents=True, exist_ok=True)
@@ -123,10 +129,27 @@ def wg_endpoint(text: str | None) -> str | None:
 
 
 class Tunnel:
+    """wireproxy běží jako podproces; výstup jde do logu kontejneru a do bufferu pro UI."""
+
     def __init__(self):
         self.proc: subprocess.Popen | None = None
         self.conf: str | None = None
-        self.path = Path("/tmp/wireproxy.conf")
+        self.path = Path(tempfile.gettempdir()) / "wireproxy.conf"
+        self.log: deque[str] = deque(maxlen=60)
+
+    def _pump(self, proc):
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line or "Health metric request" in line:
+                continue
+            print(f"[wireproxy] {line}", flush=True)
+            if "Routine:" not in line:
+                self.log.append(line)
+
+    def _spawn(self):
+        self.proc = subprocess.Popen([WIREPROXY, "-c", str(self.path), "-i", f"127.0.0.1:{WG_INFO_PORT}"],
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        threading.Thread(target=self._pump, args=(self.proc,), daemon=True).start()
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
@@ -137,33 +160,56 @@ class Tunnel:
                 self.proc.kill()
         self.proc = None
 
+    def tail(self, n=6) -> str:
+        return " | ".join(list(self.log)[-n:])
+
     async def start(self, wg_text: str):
         self.stop()
+        self.log.clear()
         self.conf = wireproxy_conf(wg_text)
         self.path.write_text(self.conf)
         self.path.chmod(0o600)
-        chk = subprocess.run([WIREPROXY, "-n", "-c", str(self.path)], capture_output=True, text=True)
+        try:
+            chk = subprocess.run([WIREPROXY, "-n", "-c", str(self.path)], capture_output=True, text=True, timeout=10)
+        except FileNotFoundError:
+            raise ValueError(f"Binárka wireproxy nenalezena ({WIREPROXY})")
         if chk.returncode != 0:
             raise ValueError("Neplatná konfigurace WireGuard: " + (chk.stderr or chk.stdout).strip()[-300:])
-        self.proc = subprocess.Popen([WIREPROXY, "-s", "-c", str(self.path)],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._spawn()
         for _ in range(50):
             if self.proc.poll() is not None:
-                raise ValueError("wireproxy se ukončil hned po startu")
+                await asyncio.sleep(0.2)
+                raise ValueError("wireproxy se ukončil hned po startu: " + self.tail())
             with socket.socket() as s:
                 if s.connect_ex(("127.0.0.1", WG_PORT)) == 0:
                     return
             await asyncio.sleep(0.2)
-        raise ValueError("wireproxy nenaběhl")
+        raise ValueError("wireproxy nenaběhl: " + self.tail())
 
     async def ensure(self):
-        if self.conf and (self.proc is None or self.proc.poll() is not None):
-            await self.start_raw()
+        if self.conf and not self.running:
+            print("[wireproxy] proces neběží – restartuji", flush=True)
+            self._spawn()
+            await asyncio.sleep(1)
 
-    async def start_raw(self):
-        self.proc = subprocess.Popen([WIREPROXY, "-s", "-c", str(self.path)],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        await asyncio.sleep(1)
+    def stats(self) -> dict:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{WG_INFO_PORT}/metrics", timeout=2) as r:
+                kv = dict(l.split("=", 1) for l in r.read().decode().splitlines() if "=" in l)
+            hs = int(kv.get("last_handshake_time_sec", 0))
+            return {"handshake_age": int(time.time()) - hs if hs else None,
+                    "rx_bytes": int(kv.get("rx_bytes", 0)), "tx_bytes": int(kv.get("tx_bytes", 0))}
+        except Exception:  # noqa: BLE001
+            return {"handshake_age": None, "rx_bytes": 0, "tx_bytes": 0}
+
+    async def wait_handshake(self, timeout=10) -> dict:
+        st = self.stats()
+        for _ in range(timeout * 2):
+            if st["handshake_age"] is not None:
+                break
+            await asyncio.sleep(0.5)
+            st = self.stats()
+        return st
 
     @property
     def running(self):
@@ -359,11 +405,24 @@ async def test_conn(host, token, wg):
     try:
         await ua.configure(host, token, wg, None)
         if wg:
-            steps.append({"ok": True, "text": f"WireGuard spuštěn (endpoint {wg_endpoint(wg)})"})
+            ep = wg_endpoint(wg)
+            steps.append({"ok": True, "text": "WireGuard klient spuštěn"})
+            st = await ua.tunnel.wait_handshake(10)
+            if st["handshake_age"] is None:
+                steps.append({"ok": False, "text": f"UDM neodpověděl na WireGuard handshake (endpoint {ep}, UDP). "
+                              "Zkontrolujte: veřejnou IP / DDNS v Endpoint, že škola není za CGNAT, "
+                              "přesměrování UDP portu, že klient na UDM existuje (klíče sedí) a že síť serveru "
+                              "pouští odchozí UDP."})
+                return {"ok": False, "steps": steps, "wg_log": ua.tunnel.tail(10)}
+            steps.append({"ok": True, "text": f"Handshake s UDM proběhl (endpoint {ep})"})
         r = await ua.client.get("/users", params={"page_num": 1, "page_size": 1})
         steps.append({"ok": True, "text": f"Konzole {host} odpovídá"})
         fp = ua.fingerprint(r)
-        body = r.json()
+        try:
+            body = r.json()
+        except ValueError:
+            steps.append({"ok": False, "text": f"Na {host} neodpovídá UniFi Access API (HTTP {r.status_code}) – je to správná konzole?"})
+            return {"ok": False, "steps": steps}
         if body.get("code") != "SUCCESS":
             steps.append({"ok": False, "text": f"API token odmítnut: {body.get('code')} – {body.get('msg')}"})
             return {"ok": False, "steps": steps}
@@ -373,11 +432,16 @@ async def test_conn(host, token, wg):
     except ValueError as e:
         steps.append({"ok": False, "text": str(e)})
     except httpx.HTTPError as e:
-        steps.append({"ok": False, "text": f"Konzole {host} nedostupná ({type(e).__name__})"
-                      + (" – tunel nemusí být navázán (endpoint, klíče, firewall UDM)" if wg else "")})
+        steps.append({"ok": False, "text": f"Konzole {host} nedostupná ({type(e).__name__}: {e})"
+                      + (" – tunel je navázán, ale konzole přes něj neodpovídá: ověřte IP konzole a že VPN "
+                         "klienti na UDM smí na TCP 12445" if wg else "")})
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        steps.append({"ok": False, "text": f"Neočekávaná chyba: {type(e).__name__}: {e}"})
     finally:
+        log = ua.tunnel.tail(10) if wg else None
         await apply_saved()
-    return {"ok": False, "steps": steps}
+    return {"ok": False, "steps": steps, "wg_log": log}
 
 
 def check_setup_code(code: str, ip: str):
@@ -447,6 +511,7 @@ async def status(who: str = Depends(auth)):
     wg = dec(cfg.get("wg_conf"))
     return {"user": who, "site_name": cfg.get("site_name"), "ua_host": cfg.get("ua_host"),
             "wireguard": bool(wg), "wg_endpoint": wg_endpoint(wg), "tunnel_up": ua.tunnel.running,
+            **(ua.tunnel.stats() if wg else {}),
             "cert_sha256": cfg.get("cert_sha256"), "last_error": ua.last_error}
 
 

@@ -78,7 +78,8 @@ async function test() {
     cert = r.cert_sha256;
     $('#steps').innerHTML = r.steps.map(s => `<li>${s.ok ? '✅' : '❌'} ${esc(s.text)}</li>`).join('') +
       (r.ok ? `<li>👥 Uživatelů v UniFi Access: <b>${r.users_total ?? '?'}</b></li>
-               <li>🔒 Otisk certifikátu konzole (bude se ověřovat):<div class="fp">${esc(cert || 'nezjištěn')}</div></li>` : '');
+               <li>🔒 Otisk certifikátu konzole (bude se ověřovat):<div class="fp">${esc(cert || 'nezjištěn')}</div></li>` : '') +
+      (r.wg_log ? `<li class="mute">Log WireGuard:<div class="fp">${esc(r.wg_log)}</div></li>` : '');
     $('#finish').disabled = !r.ok;
   } catch (e) { $('#steps').innerHTML = ''; $('#err').textContent = e.message; }
 }
