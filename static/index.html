@@ -92,7 +92,8 @@
         <div><label>Heslo (min. 10 znaků)</label><input id="aPw" type="password" autocomplete="new-password"></div>
         <div><label>Typ účtu</label><select id="aRole"><option value="operator">Operátor</option><option value="admin">Správce</option></select></div>
       </div>
-      <div id="aRolesBox"><label>Smí zakládat a spravovat uživatele v rolích</label><div class="checks" id="aRoles"></div></div>
+      <div id="aRolesBox"><label>Smí zakládat a spravovat uživatele v rolích</label><div class="checks" id="aRoles"></div>
+        <label class="inline" style="margin-top:8px"><input type="checkbox" id="aSeeAll"> Vidí všechny uživatele (i bez role) – uživatele bez role může zařadit do svých rolí, ostatní jen prohlíží</label></div>
       <div class="foot"><button class="btn" onclick="resetAccountForm()">Vyčistit</button>
         <button class="btn primary" onclick="saveAccount()">Uložit účet</button></div>
     </div>
@@ -200,7 +201,8 @@
             <option value="operator">Operátor</option><option value="admin">Správce</option></select></div>
         <div><label>Přihlašovací jméno</label><input id="uAccUser" autocomplete="off"></div>
       </div>
-      <div id="uAccRolesBox"><label>Smí zakládat a spravovat uživatele v rolích</label><div class="checks" id="uAccRoles"></div></div>
+      <div id="uAccRolesBox"><label>Smí zakládat a spravovat uživatele v rolích</label><div class="checks" id="uAccRoles"></div>
+        <label class="inline" style="margin-top:8px"><input type="checkbox" id="uAccSeeAll"> Vidí všechny uživatele (i bez role) – uživatele bez role může zařadit do svých rolí, ostatní jen prohlíží</label></div>
       <div id="uAccPwBox"><label id="uAccPwLabel">Heslo (min. 10 znaků)</label>
         <div class="bar"><input id="uAccPw" class="grow" autocomplete="new-password">
           <button class="btn sm" onclick="genPw()">Vygenerovat</button></div>
@@ -286,7 +288,8 @@ const userPolicies = u => (u.access_policies || []).map(p => p.id);
 const roleName = id => (ROLES.find(r => r.group_id === id) || {}).name;
 const isAdmin = () => ST.account_role === 'admin';
 const roleOptions = (sel, placeholder) => (placeholder ? `<option value="">${placeholder}</option>` : '') +
-  ROLES.map(r => `<option value="${esc(r.group_id)}" ${r.group_id === sel ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
+  ROLES.filter(r => r.allowed !== false || r.group_id === sel)
+    .map(r => `<option value="${esc(r.group_id)}" ${r.group_id === sel ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
 
 async function loadUsers() {
   await run(async () => {
@@ -295,7 +298,7 @@ async function loadUsers() {
     USERS.sort((a, b) => fullName(a).localeCompare(fullName(b), 'cs'));
     const cur = $('#fRole').value;
     $('#fRole').innerHTML = '<option value="">Všechny role</option>' + roleOptions(cur) +
-      (isAdmin() ? `<option value="__none" ${cur === '__none' ? 'selected' : ''}>— bez role —</option>` : '');
+      (isAdmin() || ST.see_all ? `<option value="__none" ${cur === '__none' ? 'selected' : ''}>— bez role —</option>` : '');
     $('#lUser').innerHTML = '<option value="">Všichni uživatelé</option>' +
       USERS.map(u => `<option value="${u.id}">${esc(fullName(u))}</option>`).join('');
     renderUsers();
@@ -316,7 +319,7 @@ function renderUsers() {
     <div class="stat"><span class="mute">Celkem</span><b>${USERS.length}</b></div>
     <div class="stat"><span class="mute">Aktivní</span><b>${cnt('ACTIVE')}</b></div>
     <div class="stat"><span class="mute">Deaktivovaní</span><b>${cnt('DEACTIVATED')}</b></div>
-    ${isAdmin() ? `<div class="stat" title="Uživatelé, kteří nejsou v žádné roli" style="cursor:pointer" onclick="$('#fRole').value='__none';renderUsers()"><span class="mute">Bez role ⚠</span><b>${noRole}</b></div>` : ''}`;
+    ${isAdmin() || ST.see_all ? `<div class="stat" title="Uživatelé, kteří nejsou v žádné roli" style="cursor:pointer" onclick="$('#fRole').value='__none';renderUsers()"><span class="mute">Bez role ⚠</span><b>${noRole}</b></div>` : ''}`;
 
   $('#users').innerHTML = list.map(u => {
     const nfc = (u.nfc_cards || []).length, pin = u.pin_code && (u.pin_code.token || u.pin_code),
@@ -330,8 +333,8 @@ function renderUsers() {
       <td class="mute">${accBadge(u.id)} ${nfc ? `💳 ${nfc}` : ''} ${pin ? '🔢 PIN' : ''} ${lp ? `🚗 ${lp}` : ''}
         ${(u.access_policies || []).length ? `<span title="Individuální politiky: ${esc(u.access_policies.map(p => p.name).join(', '))}">⚠ vlastní politiky</span>` : ''}</td>
       <td class="act">
-        <button class="btn sm" onclick="openUser('${u.id}')">Upravit</button>
-        <button class="btn sm" onclick="toggleStatus('${u.id}','${active ? 'DEACTIVATED' : 'ACTIVE'}')">${active ? 'Deaktivovat' : 'Aktivovat'}</button>
+        <button class="btn sm" onclick="openUser('${u.id}')">${u.can_manage === false ? 'Zobrazit' : 'Upravit'}</button>
+        ${u.can_manage === false ? '' : `<button class="btn sm" onclick="toggleStatus('${u.id}','${active ? 'DEACTIVATED' : 'ACTIVE'}')">${active ? 'Deaktivovat' : 'Aktivovat'}</button>`}
         ${isAdmin() ? `<button class="btn sm danger" onclick="delUser('${u.id}')">Smazat</button>` : ''}
       </td></tr>`;
   }).join('') || '<tr><td colspan="6" class="mute">Nic nenalezeno</td></tr>';
@@ -479,7 +482,8 @@ async function openUser(id) {
 async function reloadUser() { CUR = await api('GET', `/api/users/${CUR.id}`); renderUser(); loadUsers(); }
 function renderUser() {
   const u = CUR;
-  $('#uTitle').textContent = fullName(u);
+  $('#uTitle').textContent = fullName(u) + (u.can_manage === false ? ' (jen pro čtení)' : '');
+  udlg.classList.toggle('readonly', u.can_manage === false);
   $('#uStatus').innerHTML = `<span class="pill ${u.status}">${STATUS_CZ[u.status] || esc(u.status)}</span>`;
   $('#uFirst').value = u.first_name || ''; $('#uLast').value = u.last_name || '';
   $('#uEmail').value = u.user_email || '';
@@ -670,7 +674,7 @@ async function loadAccounts() {
       <td><b>${esc(a.user)}</b> <span class="mute">${esc(a.name)}</span>
         ${a.ua_user_id ? `<br><a href="#" class="hint" onclick="openUser('${esc(a.ua_user_id)}');return false">↔ ${esc(fullName(USERS.find(x => x.id === a.ua_user_id) || {first_name: 'uživatel v Access'}))}</a>` : ''}</td>
       <td>${a.role === 'admin' ? '<span class="pill ACTIVE">správce</span>' : '<span class="pill">operátor</span>'}</td>
-      <td class="mute">${a.role === 'admin' ? 'všechny role' : esc(a.allowed_roles.map(id => roleName(id) || '?').join(', ') || '—')}</td>
+      <td class="mute">${a.role === 'admin' ? 'všechny role' : esc(a.allowed_roles.map(id => roleName(id) || '?').join(', ') || '—') + (a.see_all ? ' · vidí všechny' : '')}</td>
       <td class="act"><button class="btn sm" onclick="editAccount('${esc(a.user)}')">Upravit</button>
         ${a.user !== ST.user ? `<button class="btn sm danger" onclick="deleteAccount('${esc(a.user)}')">Smazat</button>` : ''}</td></tr>`).join('');
     resetAccountForm();
@@ -684,18 +688,19 @@ $('#aRole').onchange = () => $('#aRolesBox').classList.toggle('hidden', $('#aRol
 function resetAccountForm() {
   $('#aFormTitle').textContent = 'Nový účet'; $('#aUser').disabled = false;
   ['#aUser', '#aName', '#aPw'].forEach(s => $(s).value = ''); $('#aPw').placeholder = '';
-  $('#aRole').value = 'operator'; $('#aRole').onchange(); accountRoleChecks();
+  $('#aRole').value = 'operator'; $('#aRole').onchange(); accountRoleChecks(); $('#aSeeAll').checked = false;
 }
 function editAccount(user) {
   const a = ACCOUNTS.find(x => x.user === user);
   $('#aFormTitle').textContent = 'Úprava účtu ' + user; $('#aUser').value = a.user; $('#aUser').disabled = true;
   $('#aName').value = a.name || ''; $('#aPw').value = ''; $('#aPw').placeholder = 'ponechat stávající';
-  $('#aRole').value = a.role; $('#aRole').onchange(); accountRoleChecks(a.allowed_roles);
+  $('#aRole').value = a.role; $('#aRole').onchange(); accountRoleChecks(a.allowed_roles); $('#aSeeAll').checked = !!a.see_all;
   $('#aUser').scrollIntoView({behavior: 'smooth', block: 'center'});
 }
 const saveAccount = () => run(async () => {
   await api('POST', '/api/accounts', {user: $('#aUser').value.trim(), name: $('#aName').value, password: $('#aPw').value,
-    role: $('#aRole').value, allowed_roles: [...document.querySelectorAll('#aRoles input:checked')].map(i => i.value)});
+    role: $('#aRole').value, see_all: $('#aSeeAll').checked,
+    allowed_roles: [...document.querySelectorAll('#aRoles input:checked')].map(i => i.value)});
   await loadAccounts();
 }, 'Účet uložen');
 function deleteAccount(user) {
@@ -717,6 +722,7 @@ function renderAcc() {
   $('#uAccRoles').innerHTML = ROLES.map(r => `<label><input type="checkbox" value="${esc(r.group_id)}"
       ${(a ? a.allowed_roles : [CUR.role_id]).includes(r.group_id) ? 'checked' : ''}> ${esc(r.name)}</label>`).join('')
     || '<span class="mute">Nejdřív nastavte role v Nastavení.</span>';
+  $('#uAccSeeAll').checked = !!(a && a.see_all);
   $('#uAccDel').classList.toggle('hidden', !a || a.user === ST.user);
   $('#uAccType').onchange();
 }
@@ -737,7 +743,8 @@ async function saveAcc() {
   await run(async () => {
     const pw = $('#uAccPw').value;
     await api('POST', '/api/accounts', {user: $('#uAccUser').value.trim(), name: fullName(CUR), password: pw, role: type,
-      ua_user_id: CUR.id, allowed_roles: [...document.querySelectorAll('#uAccRoles input:checked')].map(i => i.value)});
+      ua_user_id: CUR.id, see_all: $('#uAccSeeAll').checked,
+      allowed_roles: [...document.querySelectorAll('#uAccRoles input:checked')].map(i => i.value)});
     ACCOUNTS = await api('GET', '/api/accounts'); renderAcc(); renderUsers();
     if (pw && !a) alert(`Účet vytvořen.\n\nPřihlašovací jméno: ${$('#uAccUser').value}\nHeslo: ${pw}\n\nHeslo si poznamenejte – znovu se nezobrazí.`);
   }, 'Účet uložen');
