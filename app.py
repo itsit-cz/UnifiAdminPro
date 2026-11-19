@@ -810,10 +810,12 @@ async def set_role(uid: str, r: RoleIn, who: str = Depends(auth)):
         if old:
             await ua.request("POST", f"/user_groups/{old}/users/delete", json=[uid])
         invalidate_members()
-    removed = await clear_own_policies(uid)
-    audit(who, "role", {"user_id": uid, "from": role_name(cfg, old), "to": role_name(cfg, r.role_id),
-                        **({"own_policies_removed": removed} if removed else {})})
-    return {"ok": True, "own_policies_removed": removed}
+    try:   # přístup jen přes roli – pokus o úklid přímo přiřazených politik, chyba nesmí zablokovat změnu role
+        await clear_own_policies(uid)
+    except HTTPException as e:
+        print(f"[roles] vlastní politiky uživatele {uid} nelze odebrat: {e.detail}", flush=True)
+    audit(who, "role", {"user_id": uid, "from": role_name(cfg, old), "to": role_name(cfg, r.role_id)})
+    return {"ok": True}
 
 
 @app.post("/api/maintenance/clear-own-policies")
