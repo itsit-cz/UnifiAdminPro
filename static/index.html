@@ -12,7 +12,7 @@
   <nav>
     <button data-tab="users" class="on">Uživatelé</button>
     <button data-tab="logs">Průchody</button>
-    <button data-tab="audit">Audit změn</button>
+    <button data-tab="audit" class="admin-only">Audit změn</button>
     <button data-tab="settings">Nastavení</button>
   </nav>
   <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="who" class="mute"></span><span id="ver" class="mute" style="font-size:12px"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
@@ -30,12 +30,12 @@
         <option value="DEACTIVATED">Deaktivovaní</option>
         <option value="PENDING">Čekající</option>
       </select>
-      <select id="fPolicy"><option value="">Všechny politiky</option></select>
+      <select id="fRole"><option value="">Všechny role</option></select>
       <button class="btn" onclick="loadUsers()">↻</button>
       <button class="btn primary" onclick="openNew()">+ Přidat uživatele</button>
     </div>
     <table>
-      <thead><tr><th>Jméno</th><th>E-mail</th><th>Os. číslo</th><th>Stav</th><th>Přístupové politiky</th><th>Údaje</th><th></th></tr></thead>
+      <thead><tr><th>Jméno</th><th>E-mail</th><th>Role</th><th>Stav</th><th>Údaje</th><th></th></tr></thead>
       <tbody id="users"></tbody>
     </table>
   </section>
@@ -70,7 +70,33 @@
 
   <!-- NASTAVENÍ -->
   <section id="tab-settings" class="hidden">
-    <div class="card form" style="max-width:720px">
+    <div class="card form admin-only" style="max-width:900px">
+      <h2>Role (skupiny z UniFi Access)</h2>
+      <div class="hint">Zaškrtněte skupiny, které se v aplikaci používají jako role, a případně jim dejte vlastní název.
+        Přístup ke dveřím se řídí politikami přiřazenými skupině v UniFi Access.</div>
+      <table class="mini" style="margin-top:10px"><tbody id="gTable"><tr><td class="mute">Načítám…</td></tr></tbody></table>
+      <div class="foot"><button class="btn" onclick="loadGroups()">↻ Načíst znovu</button>
+        <button class="btn primary" onclick="saveRoles()">Uložit role</button></div>
+    </div>
+    <div class="card form admin-only" style="max-width:900px">
+      <h2>Účty aplikace</h2>
+      <div class="hint"><b>Správce</b> může vše. <b>Operátor</b> vidí a spravuje jen uživatele ve svých rolích
+        (zakládání, úpravy, karty, PIN, SPZ, deaktivace) – nemůže mazat, měnit nastavení ani číst audit.</div>
+      <table class="mini" style="margin-top:10px"><tbody id="aTable"></tbody></table>
+      <h3 id="aFormTitle" style="margin:16px 0 0;font-size:14px">Nový účet</h3>
+      <div class="row2">
+        <div><label>Uživatelské jméno</label><input id="aUser" autocomplete="off"></div>
+        <div><label>Jméno a příjmení</label><input id="aName" autocomplete="off"></div>
+      </div>
+      <div class="row2">
+        <div><label>Heslo (min. 10 znaků)</label><input id="aPw" type="password" autocomplete="new-password"></div>
+        <div><label>Typ účtu</label><select id="aRole"><option value="operator">Operátor</option><option value="admin">Správce</option></select></div>
+      </div>
+      <div id="aRolesBox"><label>Smí zakládat a spravovat uživatele v rolích</label><div class="checks" id="aRoles"></div></div>
+      <div class="foot"><button class="btn" onclick="resetAccountForm()">Vyčistit</button>
+        <button class="btn primary" onclick="saveAccount()">Uložit účet</button></div>
+    </div>
+    <div class="card form admin-only" style="max-width:720px">
       <h2>Připojení k UniFi Access</h2>
       <label>Adresa konzole</label><input id="sHost" placeholder="172.16.0.1:12445">
       <label>API token</label><input id="sToken" type="password" placeholder="ponechat stávající">
@@ -84,7 +110,7 @@
         <button class="btn primary" id="sSave" disabled onclick="sSave()">Uložit</button></div>
       <ul class="steps" id="sSteps"></ul>
     </div>
-    <div class="card form" style="max-width:720px">
+    <div class="card form admin-only" style="max-width:720px">
       <h2>Aktualizace</h2>
       <div id="vInfo" class="hint"></div>
       <div class="foot"><button class="btn" onclick="loadVersion(true)">Zkontrolovat</button>
@@ -131,12 +157,11 @@
       </div>
       <label>E-mail</label><input id="fEmail" type="email">
       <div class="row2">
-        <div><label>Osobní číslo</label><input id="fEmp"></div>
+        <div><label>Role *</label><select id="fRoleNew" style="width:100%"></select></div>
         <div><label>PIN (4–8 číslic)</label><input id="fPin" inputmode="numeric" pattern="\d{4,8}"></div>
       </div>
+      <div class="hint" id="fRoleInfo"></div>
     </div>
-    <label>Přístupové politiky</label>
-    <div class="checks" id="fPolicies"></div>
     <div class="foot">
       <button class="btn" onclick="dlg.close()">Zrušit</button>
       <button class="btn primary" id="dlgSave">Uložit</button>
@@ -155,17 +180,16 @@
         <div><label>Jméno *</label><input id="uFirst"></div>
         <div><label>Příjmení *</label><input id="uLast"></div>
       </div>
-      <div class="row2">
-        <div><label>E-mail</label><input id="uEmail" type="email"></div>
-        <div><label>Osobní číslo</label><input id="uEmp"></div>
-      </div>
+      <label>E-mail</label><input id="uEmail" type="email">
       <div class="foot"><button class="btn primary sm" onclick="saveInfo()">Uložit údaje</button></div>
     </section>
 
     <section class="usec">
-      <h3>Přístupové politiky</h3>
-      <div class="checks" id="uPolicies"></div>
-      <div class="foot"><button class="btn primary sm" onclick="savePolicies()">Uložit politiky</button></div>
+      <h3>Role</h3>
+      <div class="bar"><select id="uRole" class="grow"></select>
+        <button class="btn primary sm" onclick="saveRole()">Změnit roli</button></div>
+      <div class="hint" id="uRoleInfo"></div>
+      <div class="hint" id="uIndiv"></div>
     </section>
 
     <section class="usec">
@@ -208,7 +232,7 @@
 <div id="toast"></div>
 
 <script>
-let USERS = [], POLICIES = [];
+let USERS = [], POLICIES = [], ROLES = [];
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const STATUS_CZ = {ACTIVE:'Aktivní', DEACTIVATED:'Deaktivován', PENDING:'Čeká'};
@@ -235,20 +259,25 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
   document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + b.dataset.tab));
   if (b.dataset.tab === 'audit') loadAudit();
-  if (b.dataset.tab === 'settings') { loadSettings(); loadVersion(); loadUpdater(); }
+  if (b.dataset.tab === 'settings' && isAdmin()) { loadSettings(); loadVersion(); loadUpdater(); loadGroups(); loadAccounts(); }
   if (b.dataset.tab === 'logs' && !$('#logs').children.length) loadLogs();
 });
 
 // ---------- uživatelé
 const fullName = u => u.full_name || `${u.first_name ?? ''} ${u.last_name ?? ''}`.trim();
 const userPolicies = u => (u.access_policies || []).map(p => p.id);
+const roleName = id => (ROLES.find(r => r.group_id === id) || {}).name;
+const isAdmin = () => ST.account_role === 'admin';
+const roleOptions = (sel, placeholder) => (placeholder ? `<option value="">${placeholder}</option>` : '') +
+  ROLES.map(r => `<option value="${esc(r.group_id)}" ${r.group_id === sel ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
 
 async function loadUsers() {
   await run(async () => {
-    [USERS, POLICIES] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/policies')]);
+    [USERS, ROLES] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/roles')]);
     USERS.sort((a, b) => fullName(a).localeCompare(fullName(b), 'cs'));
-    $('#fPolicy').innerHTML = '<option value="">Všechny politiky</option>' +
-      POLICIES.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    const cur = $('#fRole').value;
+    $('#fRole').innerHTML = '<option value="">Všechny role</option>' + roleOptions(cur) +
+      (isAdmin() ? `<option value="__none" ${cur === '__none' ? 'selected' : ''}>— bez role —</option>` : '');
     $('#lUser').innerHTML = '<option value="">Všichni uživatelé</option>' +
       USERS.map(u => `<option value="${u.id}">${esc(fullName(u))}</option>`).join('');
     renderUsers();
@@ -256,20 +285,20 @@ async function loadUsers() {
 }
 
 function renderUsers() {
-  const q = $('#q').value.toLowerCase(), st = $('#fStatus').value, pol = $('#fPolicy').value;
+  const q = $('#q').value.toLowerCase(), st = $('#fStatus').value, rf = $('#fRole').value;
   const list = USERS.filter(u =>
     (!st || u.status === st) &&
-    (!pol || userPolicies(u).includes(pol)) &&
+    (!rf || (rf === '__none' ? !u.role_id : u.role_id === rf)) &&
     (!q || [fullName(u), u.user_email, u.employee_number, ...(u.license_plates || []).map(p => p.credential),
             ...(u.nfc_cards || []).map(c => c.id)].join(' ').toLowerCase().includes(q)));
 
   const cnt = s => USERS.filter(u => u.status === s).length;
-  const noPol = USERS.filter(u => u.status === 'ACTIVE' && !userPolicies(u).length).length;
+  const noRole = USERS.filter(u => !u.role_id).length;
   $('#stats').innerHTML = `
     <div class="stat"><span class="mute">Celkem</span><b>${USERS.length}</b></div>
     <div class="stat"><span class="mute">Aktivní</span><b>${cnt('ACTIVE')}</b></div>
     <div class="stat"><span class="mute">Deaktivovaní</span><b>${cnt('DEACTIVATED')}</b></div>
-    <div class="stat" title="Aktivní uživatelé bez přiřazené politiky"><span class="mute">Bez politiky ⚠</span><b>${noPol}</b></div>`;
+    ${isAdmin() ? `<div class="stat" title="Uživatelé, kteří nejsou v žádné roli" style="cursor:pointer" onclick="$('#fRole').value='__none';renderUsers()"><span class="mute">Bez role ⚠</span><b>${noRole}</b></div>` : ''}`;
 
   $('#users').innerHTML = list.map(u => {
     const nfc = (u.nfc_cards || []).length, pin = u.pin_code && (u.pin_code.token || u.pin_code),
@@ -278,18 +307,18 @@ function renderUsers() {
     return `<tr>
       <td><a href="#" onclick="openUser('${u.id}');return false"><b>${esc(fullName(u))}</b></a></td>
       <td>${esc(u.user_email) || '<span class="mute">—</span>'}</td>
-      <td>${esc(u.employee_number) || '<span class="mute">—</span>'}</td>
+      <td>${u.role_id ? `<span class="pill role">${esc(roleName(u.role_id) || '?')}</span>` : '<span class="mute">— bez role</span>'}</td>
       <td><span class="pill ${u.status}">${STATUS_CZ[u.status] || esc(u.status)}</span></td>
-      <td>${(u.access_policies || []).map(p => `<span class="pill">${esc(p.name)}</span>`).join('') || '<span class="mute">žádná</span>'}</td>
-      <td class="mute">${nfc ? `💳 ${nfc}` : ''} ${pin ? '🔢 PIN' : ''} ${lp ? `🚗 ${lp}` : ''}</td>
+      <td class="mute">${nfc ? `💳 ${nfc}` : ''} ${pin ? '🔢 PIN' : ''} ${lp ? `🚗 ${lp}` : ''}
+        ${(u.access_policies || []).length ? `<span title="Individuální politiky: ${esc(u.access_policies.map(p => p.name).join(', '))}">⚠ vlastní politiky</span>` : ''}</td>
       <td class="act">
         <button class="btn sm" onclick="openUser('${u.id}')">Upravit</button>
         <button class="btn sm" onclick="toggleStatus('${u.id}','${active ? 'DEACTIVATED' : 'ACTIVE'}')">${active ? 'Deaktivovat' : 'Aktivovat'}</button>
-        <button class="btn sm danger" onclick="delUser('${u.id}')">Smazat</button>
+        ${isAdmin() ? `<button class="btn sm danger" onclick="delUser('${u.id}')">Smazat</button>` : ''}
       </td></tr>`;
-  }).join('') || '<tr><td colspan="7" class="mute">Nic nenalezeno</td></tr>';
+  }).join('') || '<tr><td colspan="6" class="mute">Nic nenalezeno</td></tr>';
 }
-['#q', '#fStatus', '#fPolicy'].forEach(s => $(s).addEventListener('input', renderUsers));
+['#q', '#fStatus', '#fRole'].forEach(s => $(s).addEventListener('input', renderUsers));
 
 function policyChecks(selected = [], target = '#fPolicies') {
   $(target).innerHTML = POLICIES.map(p =>
@@ -301,13 +330,19 @@ const checkedPolicies = (target = '#fPolicies') => [...document.querySelectorAll
 function openNew() {
   $('#dlgTitle').textContent = 'Nový uživatel';
   $('#dlgNewFields').classList.remove('hidden');
-  ['#fFirst', '#fLast', '#fEmail', '#fEmp', '#fPin'].forEach(s => $(s).value = '');
-  policyChecks();
+  ['#fFirst', '#fLast', '#fEmail', '#fPin'].forEach(s => $(s).value = '');
+  const preset = $('#fRole').value && $('#fRole').value !== '__none' ? $('#fRole').value : (ROLES.length === 1 ? ROLES[0].group_id : '');
+  $('#fRoleNew').innerHTML = roleOptions(preset, '— vyberte roli —');
+  const info = () => { const r = ROLES.find(x => x.group_id === $('#fRoleNew').value);
+    $('#fRoleInfo').textContent = r ? 'Přístup podle role: ' + (r.policies.join(', ') || 'žádné politiky ve skupině') :
+      (ROLES.length ? '' : 'Zatím nejsou nastavené žádné role – správce je nastaví v Nastavení → Role.'); };
+  $('#fRoleNew').onchange = info; info();
   $('#dlgSave').onclick = () => run(async () => {
     const body = {first_name: $('#fFirst').value.trim(), last_name: $('#fLast').value.trim(),
-      user_email: $('#fEmail').value.trim() || null, employee_number: $('#fEmp').value.trim() || null,
-      pin_code: $('#fPin').value.trim() || null, access_policy_ids: checkedPolicies()};
+      user_email: $('#fEmail').value.trim() || null, role_id: $('#fRoleNew').value || null,
+      pin_code: $('#fPin').value.trim() || null};
     if (!body.first_name || !body.last_name) throw new Error('Vyplňte jméno a příjmení');
+    if (ROLES.length && !body.role_id) throw new Error('Vyberte roli');
     if (body.pin_code && !/^\d{4,8}$/.test(body.pin_code)) throw new Error('PIN musí mít 4–8 číslic');
     await api('POST', '/api/users', body);
     dlg.close(); await loadUsers();
@@ -375,7 +410,8 @@ async function loadStatus() {
   await run(async () => {
     ST = await api('GET', '/api/status');
     $('#site').textContent = ST.site_name || '';
-    $('#who').textContent = ST.user;
+    $('#who').textContent = ST.user + (ST.account_role === 'admin' ? ' (správce)' : ' (operátor)');
+    document.body.classList.toggle('operator', ST.account_role !== 'admin');
     const hs = ST.handshake_age, wgOk = ST.tunnel_up && hs !== null && hs < 300;
     const ok = !ST.last_error && (!ST.wireguard || wgOk);
     $('#conn').textContent = ST.wireguard ? (wgOk ? 'WG tunel ✓' : (ST.tunnel_up ? 'WG bez handshaku' : 'WG neběží')) : 'přímé spojení';
@@ -428,8 +464,13 @@ function renderUser() {
   $('#uTitle').textContent = fullName(u);
   $('#uStatus').innerHTML = `<span class="pill ${u.status}">${STATUS_CZ[u.status] || esc(u.status)}</span>`;
   $('#uFirst').value = u.first_name || ''; $('#uLast').value = u.last_name || '';
-  $('#uEmail').value = u.user_email || ''; $('#uEmp').value = u.employee_number || '';
-  policyChecks([...(u.access_policies || []).map(p => p.id), ...(u.access_policy_ids || [])], '#uPolicies');
+  $('#uEmail').value = u.user_email || '';
+  $('#uRole').innerHTML = roleOptions(u.role_id, u.role_id && roleName(u.role_id) ? '' : '— bez role —');
+  const r = ROLES.find(x => x.group_id === u.role_id);
+  $('#uRoleInfo').textContent = r ? 'Přístup podle role: ' + (r.policies.join(', ') || 'žádné politiky ve skupině') : 'Uživatel není v žádné roli.';
+  const indiv = u.access_policies || [];
+  $('#uIndiv').innerHTML = indiv.length ? `⚠ Má i individuální politiky: <b>${esc(indiv.map(p => p.name).join(', '))}</b>
+    ${isAdmin() ? '<button class="btn sm danger" onclick="clearIndiv()">Odebrat individuální politiky</button>' : ''}` : '';
   const pin = u.pin_code && (u.pin_code.token || u.pin_code);
   $('#uPinState').innerHTML = pin ? '🔢 PIN je nastaven' : '<span class="mute">PIN není nastaven</span>';
   $('#uPinDel').disabled = !pin;
@@ -447,12 +488,17 @@ udlg.addEventListener('cancel', () => { if (ENR) cancelEnroll(); });
 
 const saveInfo = () => run(async () => {
   await api('PUT', `/api/users/${CUR.id}`, {first_name: $('#uFirst').value, last_name: $('#uLast').value,
-    user_email: $('#uEmail').value, employee_number: $('#uEmp').value});
+    user_email: $('#uEmail').value, employee_number: CUR.employee_number || ''});
   await reloadUser();
 }, 'Údaje uloženy');
-const savePolicies = () => run(async () => {
-  await api('PUT', `/api/users/${CUR.id}/policies`, {access_policy_ids: checkedPolicies('#uPolicies')}); await reloadUser();
-}, 'Politiky uloženy');
+const saveRole = () => run(async () => {
+  if (!$('#uRole').value) throw new Error('Vyberte roli');
+  await api('PUT', `/api/users/${CUR.id}/role`, {role_id: $('#uRole').value}); await reloadUser();
+}, 'Role změněna');
+function clearIndiv() {
+  if (!confirm('Odebrat individuální politiky? Přístup pak bude jen podle role.')) return;
+  run(async () => { await api('PUT', `/api/users/${CUR.id}/policies`, {access_policy_ids: []}); await reloadUser(); }, 'Individuální politiky odebrány');
+}
 const setPinU = () => run(async () => {
   await api('PUT', `/api/users/${CUR.id}/pin`, {pin_code: $('#uPin').value.trim()}); $('#uPin').value = ''; await reloadUser();
 }, 'PIN nastaven');
@@ -531,8 +577,9 @@ async function enroll() {
 let VER = {};
 async function loadVersion(refresh = false) {
   try { VER = await api('GET', '/api/version' + (refresh ? '?refresh=1' : '')); } catch { return; }
-  $('#ver').textContent = 'v' + VER.current + (VER.update_available ? ' · nová verze!' : '');
-  $('#ver').style.color = VER.update_available ? 'var(--blue)' : '';
+  const showUpd = VER.update_available && isAdmin();
+  $('#ver').textContent = 'v' + VER.current + (showUpd ? ' · nová verze!' : '');
+  $('#ver').style.color = showUpd ? 'var(--blue)' : '';
   const d = t => t ? new Date(t).toLocaleString('cs-CZ') : '';
   $('#vInfo').innerHTML = `Nainstalováno: <b>${esc(VER.current)}</b> ${VER.build_date ? '(' + d(VER.build_date) + ')' : ''}<br>` +
     (VER.latest ? `Nejnovější: <b>${esc(VER.latest)}</b> – ${esc(VER.latest_title || '')} (${d(VER.latest_date)})<br>` : 'Nejnovější verzi nelze zjistit.<br>') +
@@ -578,9 +625,63 @@ async function runUpdate() {
   });
 }
 
-loadStatus();
-loadUsers();
-loadVersion();
+// ---------- role (mapování skupin) a účty
+let GROUPS = [], ACCOUNTS = [];
+async function loadGroups() {
+  await run(async () => {
+    GROUPS = await api('GET', '/api/groups');
+    $('#gTable').innerHTML = GROUPS.map((g, i) => `<tr>
+      <td style="width:28px"><input type="checkbox" id="g${i}" ${g.role ? 'checked' : ''}></td>
+      <td style="width:38%"><input id="gn${i}" value="${esc(g.role_name)}" placeholder="název role"></td>
+      <td><span class="mute">${esc(g.name)}</span><br><span class="hint">${g.policies.length ? 'Politiky: ' + esc(g.policies.join(', ')) : '⚠ skupina nemá žádné politiky'}</span></td></tr>`).join('')
+      || '<tr><td class="mute">V UniFi Access nejsou žádné skupiny uživatelů. Vytvořte je v Access → Users → Groups.</td></tr>';
+  });
+}
+const saveRoles = () => run(async () => {
+  const items = GROUPS.map((g, i) => $('#g' + i).checked ? {group_id: g.id, name: $('#gn' + i).value.trim() || g.name} : null).filter(Boolean);
+  await api('PUT', '/api/roles', items); await loadStatus(); await loadUsers(); await loadAccounts();
+}, 'Role uloženy');
+
+async function loadAccounts() {
+  await run(async () => {
+    ACCOUNTS = await api('GET', '/api/accounts');
+    $('#aTable').innerHTML = ACCOUNTS.map(a => `<tr>
+      <td><b>${esc(a.user)}</b> <span class="mute">${esc(a.name)}</span></td>
+      <td>${a.role === 'admin' ? '<span class="pill ACTIVE">správce</span>' : '<span class="pill">operátor</span>'}</td>
+      <td class="mute">${a.role === 'admin' ? 'všechny role' : esc(a.allowed_roles.map(id => roleName(id) || '?').join(', ') || '—')}</td>
+      <td class="act"><button class="btn sm" onclick="editAccount('${esc(a.user)}')">Upravit</button>
+        ${a.user !== ST.user ? `<button class="btn sm danger" onclick="deleteAccount('${esc(a.user)}')">Smazat</button>` : ''}</td></tr>`).join('');
+    resetAccountForm();
+  });
+}
+function accountRoleChecks(sel = []) {
+  $('#aRoles').innerHTML = ROLES.map(r => `<label><input type="checkbox" value="${esc(r.group_id)}" ${sel.includes(r.group_id) ? 'checked' : ''}> ${esc(r.name)}</label>`).join('')
+    || '<span class="mute">Nejdřív nastavte role výše.</span>';
+}
+$('#aRole').onchange = () => $('#aRolesBox').classList.toggle('hidden', $('#aRole').value === 'admin');
+function resetAccountForm() {
+  $('#aFormTitle').textContent = 'Nový účet'; $('#aUser').disabled = false;
+  ['#aUser', '#aName', '#aPw'].forEach(s => $(s).value = ''); $('#aPw').placeholder = '';
+  $('#aRole').value = 'operator'; $('#aRole').onchange(); accountRoleChecks();
+}
+function editAccount(user) {
+  const a = ACCOUNTS.find(x => x.user === user);
+  $('#aFormTitle').textContent = 'Úprava účtu ' + user; $('#aUser').value = a.user; $('#aUser').disabled = true;
+  $('#aName').value = a.name || ''; $('#aPw').value = ''; $('#aPw').placeholder = 'ponechat stávající';
+  $('#aRole').value = a.role; $('#aRole').onchange(); accountRoleChecks(a.allowed_roles);
+  $('#aUser').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+const saveAccount = () => run(async () => {
+  await api('POST', '/api/accounts', {user: $('#aUser').value.trim(), name: $('#aName').value, password: $('#aPw').value,
+    role: $('#aRole').value, allowed_roles: [...document.querySelectorAll('#aRoles input:checked')].map(i => i.value)});
+  await loadAccounts();
+}, 'Účet uložen');
+function deleteAccount(user) {
+  if (!confirm(`Smazat účet ${user}?`)) return;
+  run(async () => { await api('DELETE', `/api/accounts/${encodeURIComponent(user)}`); await loadAccounts(); }, 'Účet smazán');
+}
+
+(async () => { await loadStatus(); await loadUsers(); loadVersion(); })();
 </script>
 </body>
 </html>

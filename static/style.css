@@ -67,3 +67,8 @@
   a:hover b { color:var(--blue); }
   details summary { cursor:pointer; font-size:13px; }
   .usec input[type=checkbox], dialog .checks input { width:auto; }
+  body.operator .admin-only { display:none !important; }
+  .pill.role { background:#e8f1ff; color:var(--blue); }
+  #gTable input:not([type=checkbox]) { width:100%; }
+  .form .checks input { width:auto; }
+  .checks label { display:flex; gap:8px; align-items:center; font-weight:normal; margin:4px 0; }
