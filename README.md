@@ -42,7 +42,8 @@ Více škol na jednom hostu = více stacků; v každém změňte levou stranu po
 ## Role a účty
 1. V UniFi Access vytvořte skupiny uživatelů (např. Žáci, Učitelé) a přiřaďte jim přístupové politiky.
 2. Nastavení → **Role**: zaškrtněte skupiny, které se mají používat jako role, případně je přejmenujte.
-3. Nastavení → **Účty aplikace**: založte operátory (např. sekretariát) a vyberte, v jakých rolích smí pracovat.
+3. Účet v aplikaci přidělíte přímo uživateli: **Upravit → Účet v aplikaci** → typ (operátor/správce), povolené role
+   a heslo (lze vygenerovat). Přihlašovací jméno se předvyplní z e-mailu. Přehled všech účtů je v Nastavení → Účty aplikace.
 
 Členství v roli se čte ze skupin v UniFi Access – změny provedené přímo v Access se v aplikaci projeví.
 

@@ -867,11 +867,12 @@ class AccountIn(BaseModel):
     role: str = "operator"          # admin | operator
     allowed_roles: list[str] = []
     name: str = ""
+    ua_user_id: str | None = None   # propojení s uživatelem z UniFi Access
 
 
 def _acc_public(a: dict) -> dict:
     return {"user": a["user"], "name": a.get("name", ""), "role": a.get("role"),
-            "allowed_roles": a.get("allowed_roles", [])}
+            "allowed_roles": a.get("allowed_roles", []), "ua_user_id": a.get("ua_user_id")}
 
 
 @app.get("/api/accounts")
@@ -890,6 +891,10 @@ async def accounts_save(a: AccountIn, who: str = Depends(admin)):
     ids = {r["group_id"] for r in mapped_roles(cfg)}
     allowed = [x for x in a.allowed_roles if x in ids]
     acc = get_account(cfg, user)
+    if a.ua_user_id:
+        other = next((x for x in cfg["accounts"] if x.get("ua_user_id") == a.ua_user_id and x["user"] != user), None)
+        if other:
+            raise HTTPException(400, f"Tento uživatel už má účet „{other['user']}“")
     if a.password and len(a.password) < 10:
         raise HTTPException(400, "Heslo musí mít alespoň 10 znaků")
     if acc is None:
@@ -898,17 +903,20 @@ async def accounts_save(a: AccountIn, who: str = Depends(admin)):
         if a.role == "operator" and not allowed:
             raise HTTPException(400, "Operátor musí mít povolenou alespoň jednu roli")
         cfg["accounts"].append({"user": user, "pw": hash_pw(a.password), "role": a.role,
-                                "allowed_roles": allowed, "name": a.name.strip()})
+                                "allowed_roles": allowed, "name": a.name.strip(), "ua_user_id": a.ua_user_id})
         action = "account_create"
     else:
         if user == who and a.role != "admin":
             raise HTTPException(400, "Sami sobě nemůžete odebrat roli správce")
         acc.update(role=a.role, allowed_roles=allowed, name=a.name.strip())
+        if a.ua_user_id:
+            acc["ua_user_id"] = a.ua_user_id
         if a.password:
             acc["pw"] = hash_pw(a.password)
         action = "account_edit"
     save_cfg(cfg)
-    audit(who, action, {"account": user, "role": a.role, "password_changed": bool(a.password)})
+    audit(who, action, {"account": user, "role": a.role, "password_changed": bool(a.password),
+                        **({"user_id": a.ua_user_id} if a.ua_user_id else {})})
     return {"ok": True}
 
 
