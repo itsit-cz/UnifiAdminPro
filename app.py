@@ -423,15 +423,41 @@ async def test_conn(host, token, wg):
         except ValueError:
             steps.append({"ok": False, "text": f"Na {host} neodpovídá UniFi Access API (HTTP {r.status_code}) – je to správná konzole?"})
             return {"ok": False, "steps": steps}
-        if body.get("code") != "SUCCESS":
-            hint = (" – token nemá potřebná oprávnění. Vytvořte nový v Access → Settings → General → API Token "
-                    "s oprávněními view/edit pro User, Access Policy, Door/Location a System Log."
-                    if body.get("code") == "CODE_UNAUTHORIZED" else "")
-            steps.append({"ok": False, "text": f"API token odmítnut: {body.get('code')} – {body.get('msg')}{hint}"})
+        if body.get("code") in ("CODE_ACCESS_TOKEN_INVALID", "CODE_AUTH_FAILED"):
+            steps.append({"ok": False, "text": f"API token je neplatný nebo expirovaný ({body.get('code')}). "
+                          "Je vytvořený v aplikaci Access na této konzoli?"})
             return {"ok": False, "steps": steps}
-        steps.append({"ok": True, "text": "API token je platný (čtení uživatelů)"})
-        return {"ok": True, "steps": steps, "cert_sha256": fp,
-                "users_total": (body.get("pagination") or {}).get("total")}
+        # oprávnění tokenu – jen čtecí dotazy, nic se nemění
+        now = int(time.time())
+        checks = [
+            ("Uživatelé – čtení (view:user)", "GET", "/users", {"params": {"page_num": 1, "page_size": 1}}, True),
+            ("Přístupové politiky – čtení (view:policy)", "GET", "/access_policies", {}, True),
+            ("Dveře – čtení (view:location)", "GET", "/doors", {}, False),
+            ("Systémový log – čtení (view:system_log)", "POST", "/system/logs",
+             {"params": {"page_num": 1, "page_size": 1},
+              "json": {"topic": "door_openings", "since": now - 3600, "until": now}}, False),
+        ]
+        ok_all, users_total = True, None
+        for label, method, path, kw, required in checks:
+            try:
+                b = (await ua.client.request(method, path, **kw)).json()
+                code = b.get("code")
+            except Exception as e:  # noqa: BLE001
+                code = type(e).__name__
+                b = {}
+            good = code == "SUCCESS"
+            if path == "/users" and good:
+                users_total = (b.get("pagination") or {}).get("total")
+            note = "" if good or required else (" (volitelné – nebude fungovat záložka Průchody)"
+                                                if "logs" in path else " (volitelné)")
+            steps.append({"ok": good, "text": f"{label}: {'OK' if good else code}{note}"})
+            ok_all &= good or not required
+        if not ok_all:
+            steps.append({"ok": False, "text": "Tokenu chybí oprávnění. V Access → Settings → General → API Token "
+                          "vytvořte nový a zaškrtněte u User a Access Policy čtení i zápis (View + Edit), "
+                          "ideálně všechna oprávnění. Zápis (edit:user) nelze otestovat bez změny dat."})
+            return {"ok": False, "steps": steps}
+        return {"ok": True, "steps": steps, "cert_sha256": fp, "users_total": users_total}
     except ValueError as e:
         steps.append({"ok": False, "text": str(e)})
     except httpx.HTTPError as e:
