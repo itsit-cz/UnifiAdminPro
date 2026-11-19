@@ -5,11 +5,13 @@ Jednoduché webové rozhraní pro UniFi Access. Každá lokalita (škola) má **
 ke konzoli se připojuje přímo nebo přes **WireGuard VPN z UDM**, který běží uvnitř kontejneru.
 
 ## Funkce
-- **Uživatelé** – seznam, hledání, filtry, přidání (jméno, e-mail, os. číslo, PIN, politiky), změna politik,
-  PIN, deaktivace/aktivace, trvalé smazání
+- **Uživatelé** – seznam, hledání (i podle SPZ a karty), filtry, přidání, deaktivace/aktivace, trvalé smazání
+- **Detail uživatele** – úprava údajů, přístupové politiky, PIN (nastavit/odebrat),
+  **NFC karty** (načtení přiložením ke čtečce, ruční token, přeřazení, odebrání), **SPZ** (přidat/odebrat, UA 3.3.10+)
 - **Průchody** – log otevření dveří (1 h – 30 dní), filtr dle uživatele
 - **Audit změn** – kdo a kdy co změnil přes rozhraní
 - **Nastavení** – změna připojení (adresa, token, WireGuard), test připojení, změna hesla
+- **Aktualizace z webu** – zobrazí nainstalovanou a nejnovější verzi, tlačítkem spustí redeploy stacku v Portaineru
 - **Průvodce instalací** – při nasazení se nic nenastavuje, vše se vyplní v prohlížeči
 
 ## Nasazení v Portaineru
@@ -26,12 +28,20 @@ ke konzoli se připojuje přímo nebo přes **WireGuard VPN z UDM**, který bě�
 Více škol na jednom hostu = více stacků; v každém změňte levou stranu portu (`8081:8080`, …).
 
 ## Příprava na straně školy (UDM)
-1. **API token:** UniFi Access → Settings → General → Advanced → API Token → Create New
-   (oprávnění: uživatelé, politiky, dveře, systémový log).
+1. **API token:** UniFi Access → Settings → General → API Token → Create New – zaškrtněte **všechna oprávnění**
+   (minimálně view/edit pro User, Access Policy, Credential, Device, Location a System Log).
 2. **WireGuard klient:** UniFi Network → Settings → VPN → VPN Server → WireGuard → přidat klienta
    (např. „UnifiAdminPro – DC“) → stáhnout `.conf` a nahrát ho v průvodci.
    UDM musí být dostupné z internetu na portu WireGuard (veřejná IP, ne CGNAT).
 3. **Adresa konzole:** LAN IP konzole UniFi Access (u UDM jeho IP, např. `172.16.0.1`), port 12445.
+
+## Aktualizace z webu
+Nastavení → Aktualizace → způsob:
+- **Portainer API** – adresa Portaineru, přístupový token (*My account → Access tokens*) a ID stacku (číslo v URL stacku).
+  Aplikace zavolá redeploy stacku se stažením nového image. Doporučeno: samostatný uživatel Portaineru s přístupem jen k danému prostředí.
+- **Webhook stacku** – URL z *Stacks → stack → Editor → Webhooks* (v Portainer CE nemusí být k dispozici).
+
+Nejnovější verze = poslední úspěšný build image na GitHubu. Průběh je v logu kontejneru (řádky `[update]`).
 
 ## Bezpečnost
 - Instalaci lze dokončit jen s jednorázovým kódem z logu kontejneru.

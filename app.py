@@ -29,6 +29,9 @@ from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
 BASE = Path(__file__).parent
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
+APP_BUILD_DATE = os.environ.get("APP_BUILD_DATE", "")
+GITHUB_REPO = "itsit-cz/UnifiAdminPro"
 DATA = Path(os.environ.get("DATA_DIR", "/app/data"))
 KEYS = Path(os.environ.get("KEYS_DIR", "/app/keys"))
 WIREPROXY = os.environ.get("WIREPROXY_BIN", "wireproxy")
@@ -251,7 +254,7 @@ class UAClient:
         der = so.getpeercert(binary_form=True) if so else None
         return hashlib.sha256(der).hexdigest() if der else None
 
-    async def request(self, method: str, path: str, **kw):
+    async def request(self, method: str, path: str, raise_on_code: bool = True, **kw):
         if not self.client:
             raise HTTPException(503, "Připojení k UniFi Access není nastaveno")
         await self.tunnel.ensure()
@@ -271,9 +274,14 @@ class UAClient:
             body = r.json()
         except ValueError:
             raise HTTPException(502, f"Neočekávaná odpověď ({r.status_code})")
+        if not raise_on_code and r.status_code < 500:
+            return body
         if r.status_code >= 400 or body.get("code") != "SUCCESS":
-            self.last_error = f"{body.get('code')}: {body.get('msg')}"
-            raise HTTPException(r.status_code if r.status_code >= 400 else 400, self.last_error)
+            msg = f"{body.get('code')}: {body.get('msg')}"
+            if body.get("code") == "CODE_UNAUTHORIZED":
+                msg += (" – API tokenu chybí oprávnění pro tuto akci (např. edit:user, edit:credential, "
+                        "view:device). Vytvořte v Access nový token se všemi oprávněními.")
+            raise HTTPException(r.status_code if r.status_code >= 400 else 400, msg)
         self.last_error = None
         return body
 
@@ -433,6 +441,7 @@ async def test_conn(host, token, wg):
             ("Uživatelé – čtení (view:user)", "GET", "/users", {"params": {"page_num": 1, "page_size": 1}}, True),
             ("Přístupové politiky – čtení (view:policy)", "GET", "/access_policies", {}, True),
             ("Dveře – čtení (view:location)", "GET", "/doors", {}, False),
+            ("Zařízení/čtečky – čtení (view:device)", "GET", "/devices", {}, False),
             ("Systémový log – čtení (view:system_log)", "POST", "/system/logs",
              {"params": {"page_num": 1, "page_size": 1},
               "json": {"topic": "door_openings", "since": now - 3600, "until": now}}, False),
@@ -665,6 +674,258 @@ async def delete_user(uid: str, who: str = Depends(auth)):
     await ua.request("DELETE", f"/users/{uid}")
     audit(who, "delete", {"user_id": uid})
     return {"ok": True}
+
+
+
+# ---------------------------------------------------------------- detail a úprava uživatele
+class UserEditIn(BaseModel):
+    first_name: str
+    last_name: str
+    user_email: str | None = None
+    employee_number: str | None = None
+
+
+class CardIn(BaseModel):
+    token: str
+    force_add: bool = False
+
+
+class PlateIn(BaseModel):
+    plate: str
+
+
+class EnrollIn(BaseModel):
+    device_id: str
+    reset_ua_card: bool = False
+
+
+def norm_plate(p: str) -> str:
+    return "".join(ch for ch in p.upper() if ch.isalnum())
+
+
+@app.get("/api/users/{uid}")
+async def get_user(uid: str, _: str = Depends(auth)):
+    return (await ua.request("GET", f"/users/{uid}", params={"expand[]": "access_policy"}))["data"]
+
+
+@app.put("/api/users/{uid}")
+async def edit_user(uid: str, u: UserEditIn, who: str = Depends(auth)):
+    if not u.first_name.strip() or not u.last_name.strip():
+        raise HTTPException(400, "Jméno a příjmení jsou povinné")
+    body = {"first_name": u.first_name.strip(), "last_name": u.last_name.strip(),
+            "user_email": (u.user_email or "").strip(), "employee_number": (u.employee_number or "").strip()}
+    await ua.request("PUT", f"/users/{uid}", json=body)
+    audit(who, "edit", {"user_id": uid, "name": f"{body['first_name']} {body['last_name']}"})
+    return {"ok": True}
+
+
+@app.delete("/api/users/{uid}/pin")
+async def remove_pin(uid: str, who: str = Depends(auth)):
+    await ua.request("DELETE", f"/users/{uid}/pin_codes")
+    audit(who, "pin_remove", {"user_id": uid})
+    return {"ok": True}
+
+
+@app.put("/api/users/{uid}/cards")
+async def add_card(uid: str, c: CardIn, who: str = Depends(auth)):
+    token = c.token.strip()
+    if not token:
+        raise HTTPException(400, "Chybí token karty")
+    await ua.request("PUT", f"/users/{uid}/nfc_cards", json={"token": token, "force_add": c.force_add})
+    audit(who, "card_add", {"user_id": uid, "card": token[-6:]})
+    return {"ok": True}
+
+
+@app.post("/api/users/{uid}/cards/remove")
+async def remove_card(uid: str, c: CardIn, who: str = Depends(auth)):
+    await ua.request("PUT", f"/users/{uid}/nfc_cards/delete", json={"token": c.token})
+    audit(who, "card_remove", {"user_id": uid, "card": c.token[-6:]})
+    return {"ok": True}
+
+
+@app.post("/api/users/{uid}/plates")
+async def add_plate(uid: str, p: PlateIn, who: str = Depends(auth)):
+    plate = norm_plate(p.plate)
+    if not 2 <= len(plate) <= 12:
+        raise HTTPException(400, "Neplatná SPZ")
+    # API přijímá holé pole řetězců (UniFi Access 3.3.10+)
+    await ua.request("PUT", f"/users/{uid}/license_plates", json=[plate])
+    audit(who, "plate_add", {"user_id": uid, "plate": plate})
+    return {"ok": True, "plate": plate}
+
+
+@app.delete("/api/users/{uid}/plates/{pid}")
+async def remove_plate(uid: str, pid: str, plate: str = "", who: str = Depends(auth)):
+    await ua.request("DELETE", f"/users/{uid}/license_plates/{pid}")
+    audit(who, "plate_remove", {"user_id": uid, "plate": plate or pid})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- čtečky a načtení karty
+def _flatten(data):
+    for x in data or []:
+        if isinstance(x, list):
+            yield from _flatten(x)
+        elif isinstance(x, dict):
+            yield x
+
+
+@app.get("/api/devices")
+async def devices(_: str = Depends(auth)):
+    data = (await ua.request("GET", "/devices"))["data"]
+    out = [{"id": d.get("id"), "name": d.get("alias") or d.get("name") or d.get("id"),
+            "type": d.get("type") or d.get("device_type") or ""} for d in _flatten(data)]
+    # čtečky (UA-G2, UA-G3, Reader, Ultra, Intercom) napřed
+    rd = lambda d: 0 if any(k in d["type"].upper() for k in ("G2", "G3", "READER", "ULTRA", "INTERCOM", "LITE")) else 1
+    return sorted(out, key=lambda d: (rd(d), d["name"]))
+
+
+@app.post("/api/enroll")
+async def enroll_start(e: EnrollIn, _: str = Depends(auth)):
+    data = (await ua.request("POST", "/credentials/nfc_cards/sessions",
+                             json={"device_id": e.device_id, "reset_ua_card": e.reset_ua_card}))["data"]
+    return {"session_id": data.get("session_id")}
+
+
+@app.get("/api/enroll/{sid}")
+async def enroll_poll(sid: str, _: str = Depends(auth)):
+    body = await ua.request("GET", f"/credentials/nfc_cards/sessions/{sid}", raise_on_code=False)
+    code, data = body.get("code"), body.get("data") or {}
+    if code == "SUCCESS" and data.get("token"):
+        return {"done": True, "token": data["token"], "card_id": data.get("card_id") or data.get("display_id")}
+    if code in ("SUCCESS", "CODE_CREDS_NFC_READ_POLL_TOKEN_EMPTY"):
+        return {"done": False}
+    hints = {"CODE_CREDS_NFC_CARD_IS_PROVISION": "Karta je registrovaná na jiném místě – zaškrtněte „Resetovat kartu z jiného místa“.",
+             "CODE_CREDS_NFC_CARD_PROVISION_FAILED": "Držte kartu u čtečky déle než 5 sekund.",
+             "CODE_CREDS_NFC_CARD_INVALID": "Nepodporovaný typ karty (použijte UA Card, nebo povolte karty třetích stran).",
+             "CODE_CREDS_NFC_READ_SESSION_NOT_FOUND": "Relace načítání vypršela, zkuste to znovu."}
+    raise HTTPException(400, hints.get(code, f"{code}: {body.get('msg')}"))
+
+
+@app.delete("/api/enroll/{sid}")
+async def enroll_cancel(sid: str, _: str = Depends(auth)):
+    await ua.request("DELETE", f"/credentials/nfc_cards/sessions/{sid}", raise_on_code=False)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- verze a aktualizace
+_latest: dict = {"t": 0.0, "data": None}
+
+
+async def latest_build() -> dict | None:
+    """Poslední úspěšně sestavený image = poslední úspěšný běh workflow na main."""
+    if _latest["data"] and time.time() - _latest["t"] < 600:
+        return _latest["data"]
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs",
+                            params={"branch": "main", "status": "success", "per_page": 1},
+                            headers={"Accept": "application/vnd.github+json"})
+            run = r.json()["workflow_runs"][0]
+        _latest.update(t=time.time(), data={"sha": run["head_sha"], "title": run.get("display_title"),
+                                            "date": run.get("updated_at")})
+    except Exception as e:  # noqa: BLE001
+        print(f"[update] nelze zjistit nejnovější verzi: {e}", flush=True)
+    return _latest["data"]
+
+
+@app.get("/api/version")
+async def version(refresh: bool = False, _: str = Depends(auth)):
+    if refresh:
+        _latest["t"] = 0
+    lb = await latest_build()
+    upd = (load_cfg() or {}).get("updater") or {}
+    return {"current": APP_VERSION[:7], "current_full": APP_VERSION, "build_date": APP_BUILD_DATE,
+            "latest": lb["sha"][:7] if lb else None, "latest_title": lb and lb["title"],
+            "latest_date": lb and lb["date"],
+            "update_available": bool(lb and APP_VERSION != "dev" and lb["sha"] != APP_VERSION),
+            "updater": upd.get("method")}
+
+
+class UpdaterIn(BaseModel):
+    method: str                 # portainer | webhook | none
+    url: str = ""
+    token: str = ""
+    stack_id: int | None = None
+    webhook: str = ""
+
+
+async def portainer_stack(url: str, token: str, sid: int) -> dict:
+    async with httpx.AsyncClient(verify=False, timeout=15) as c:
+        r = await c.get(f"{url.rstrip('/')}/api/stacks/{sid}", headers={"X-API-Key": token})
+    if r.status_code == 401:
+        raise HTTPException(400, "Portainer odmítl přístupový token")
+    if r.status_code == 404:
+        raise HTTPException(400, f"Stack {sid} v Portaineru neexistuje")
+    if r.status_code >= 400:
+        raise HTTPException(400, f"Portainer: HTTP {r.status_code} {r.text[:150]}")
+    return r.json()
+
+
+@app.get("/api/update/config")
+async def updater_get(_: str = Depends(auth)):
+    u = (load_cfg() or {}).get("updater") or {}
+    return {"method": u.get("method", "none"), "url": u.get("url", ""), "stack_id": u.get("stack_id"),
+            "has_token": bool(u.get("token")), "has_webhook": bool(u.get("webhook"))}
+
+
+@app.post("/api/update/config")
+async def updater_save(u: UpdaterIn, who: str = Depends(auth)):
+    cfg = load_cfg()
+    old = cfg.get("updater") or {}
+    if u.method == "portainer":
+        token = u.token.strip() or dec(old.get("token")) or ""
+        if not (u.url.startswith("http") and token and u.stack_id):
+            raise HTTPException(400, "Vyplňte adresu Portaineru, přístupový token a ID stacku")
+        st = await portainer_stack(u.url, token, u.stack_id)
+        new = {"method": "portainer", "url": u.url.rstrip("/"), "token": enc(token), "stack_id": u.stack_id}
+        info = f"Stack „{st.get('Name')}“ nalezen" + (" (Git)" if st.get("GitConfig") else "")
+    elif u.method == "webhook":
+        hook = u.webhook.strip() or dec(old.get("webhook")) or ""
+        if "/api/stacks/webhooks/" not in hook:
+            raise HTTPException(400, "Očekávám URL ve tvaru https://portainer…/api/stacks/webhooks/<id>")
+        new, info = {"method": "webhook", "webhook": enc(hook)}, "Webhook uložen"
+    else:
+        new, info = {"method": "none"}, "Aktualizace z webu vypnuta"
+    cfg["updater"] = new
+    save_cfg(cfg)
+    audit(who, "updater", {"method": u.method})
+    return {"ok": True, "info": info}
+
+
+async def _do_update(u: dict):
+    try:
+        if u["method"] == "webhook":
+            async with httpx.AsyncClient(verify=False, timeout=60) as c:
+                r = await c.post(dec(u["webhook"]))
+            print(f"[update] webhook HTTP {r.status_code}", flush=True)
+            return
+        token = dec(u["token"])
+        st = await portainer_stack(u["url"], token, u["stack_id"])
+        ep = st.get("EndpointId")
+        async with httpx.AsyncClient(verify=False, timeout=300, headers={"X-API-Key": token}) as c:
+            if st.get("GitConfig"):
+                r = await c.put(f"{u['url']}/api/stacks/{u['stack_id']}/git/redeploy", params={"endpointId": ep},
+                                json={"Env": st.get("Env") or [], "Prune": False, "PullImage": True,
+                                      "RepullImageAndRedeploy": True})
+            else:
+                f = (await c.get(f"{u['url']}/api/stacks/{u['stack_id']}/file")).json()
+                r = await c.put(f"{u['url']}/api/stacks/{u['stack_id']}", params={"endpointId": ep},
+                                json={"StackFileContent": f.get("StackFileContent"), "Env": st.get("Env") or [],
+                                      "Prune": False, "PullImage": True})
+        print(f"[update] Portainer redeploy HTTP {r.status_code} {r.text[:200]}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[update] chyba: {type(e).__name__}: {e}", flush=True)
+
+
+@app.post("/api/update/run")
+async def update_run(who: str = Depends(auth)):
+    u = (load_cfg() or {}).get("updater") or {}
+    if u.get("method") not in ("portainer", "webhook"):
+        raise HTTPException(400, "Aktualizace z webu není nastavena")
+    audit(who, "update", {"from": APP_VERSION[:7], "method": u["method"]})
+    asyncio.get_running_loop().create_task(_do_update(u))
+    return {"ok": True, "from": APP_VERSION[:7]}
 
 
 @app.get("/api/logs")
