@@ -22,6 +22,7 @@
   <button data-mod="unifi" data-tab="logs">Průchody</button>
   <button data-mod="unifi" data-tab="audit" class="admin-only">Audit změn</button>
   <button data-mod="edookit" data-tab="students" class="hidden">Studenti</button>
+  <button data-mod="edookit" data-tab="compare" class="hidden">Porovnání s AD</button>
   <button data-mod="ad" data-tab="adstudents" class="hidden">Studenti</button>
   <button data-mod="ad" data-tab="ademployees" class="hidden">Zaměstnanci</button>
 </nav>
@@ -81,6 +82,41 @@
     <table>
       <thead><tr><th>Příjmení a jméno</th><th>Ročník</th><th>Třída</th><th title="Číslo S skupiny třídy (S1, S2); pomlčka = třída není dělená">Rozvrhová skupina</th><th>Stav</th><th>E-mail</th><th>Karta</th><th>ID v Edookitu</th></tr></thead>
       <tbody id="students"><tr><td colspan="8" class="mute">Klikněte na „Načíst z Edookitu“.</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- POROVNÁNÍ EDOOKIT ↔ AD -->
+  <section id="tab-compare" class="hidden">
+    <div class="stats" id="cmp-stats"></div>
+    <div class="bar">
+      <input id="cmp-q" placeholder="Hledat jméno, login, kartu, ID…" class="grow">
+      <select id="cmp-status">
+        <option value="">Všechny výsledky</option>
+        <option value="problems" selected>Jen nesoulady</option>
+        <option value="ok">✅ V pořádku</option>
+        <option value="diff">⚠ Rozdíl</option>
+        <option value="ek_only">Chybí v AD</option>
+        <option value="ad_only">Aktivní v AD, není v Edookitu</option>
+        <option value="ad_only_inactive">Vyřazený v AD</option>
+        <option value="ek_only_inactive">Neaktivní v Edookitu, bez AD</option>
+      </select>
+      <select id="cmp-diff">
+        <option value="">Jakýkoli rozdíl</option>
+        <option value="jméno">Jméno</option>
+        <option value="skupina">Třída / skupina</option>
+        <option value="karta">Karta</option>
+        <option value="stav">Stav účtu</option>
+        <option value="edookit id">Chybí Edookit ID v AD</option>
+      </select>
+      <select id="cmp-year"><option value="">Všechny ročníky</option></select>
+      <select id="cmp-class"><option value="">Všechny třídy</option></select>
+      <button class="btn primary" onclick="loadCompare(true)">↻ Načíst znovu</button>
+    </div>
+    <div class="hint" id="cmp-info" style="margin-bottom:8px"></div>
+    <table class="cmp">
+      <thead><tr><th>Výsledek</th><th>Student (Edookit)</th><th>Účet v AD</th><th>Skupina Edookit</th><th>Skupina AD</th>
+        <th>Karta Edookit</th><th>Karta AD</th><th>Stav Edookit / AD</th></tr></thead>
+      <tbody id="cmp-rows"><tr><td colspan="8" class="mute">Načítám…</td></tr></tbody>
     </table>
   </section>
 
@@ -404,6 +440,7 @@ function showTab(tab) {
     if (isAdmin()) { loadSettings(); loadVersion(); loadUpdater(); loadGroups(); loadAccounts(); ekLoad(); adLoadCfg(); } });
   if (tab === 'logs' && !$('#logs').children.length) loadLogs();
   if (tab === 'students' && !STUDENTS) loadStudents();
+  if (tab === 'compare' && !CMP) loadCompare();
   if (tab === 'adstudents' && !AD.students) loadAd('students');
   if (tab === 'ademployees' && !AD.employees) loadAd('employees');
 }
@@ -989,6 +1026,85 @@ async function openStudent(id) {
 }
 ['#eq', '#eClass', '#eActive', '#eYear', '#eSched'].forEach(s => $(s).addEventListener('input', renderStudents));
 
+// ---------- Porovnání Edookit ↔ AD
+let CMP = null;
+const CMP_ST = {ok: ['✅ v pořádku', 'ACTIVE'], diff: ['⚠ rozdíl', 'PENDING'], ek_only: ['chybí v AD', 'DEACTIVATED'],
+  ad_only: ['navíc v AD', 'DEACTIVATED'], ad_only_inactive: ['vyřazený v AD', ''], ek_only_inactive: ['neaktivní, bez AD', '']};
+async function loadCompare(refresh = false) {
+  $('#cmp-info').textContent = '⏳ Načítám Edookit a AD…';
+  try {
+    const r = await api('GET', '/api/compare/ek-ad' + (refresh ? '?refresh=1' : ''));
+    CMP = r;
+    const nm = x => `${x?.last_name || ''} ${x?.first_name || ''}`.trim();
+    r.rows.forEach(x => { x._name = nm(x.ek) || nm(x.ad) || x.ad?.name || ''; });
+    r.rows.sort((a, b) => a._name.localeCompare(b._name, 'cs'));
+    const num = (a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true});
+    const fill = (sel, label, vals) => { const cur = $(sel).value;
+      $(sel).innerHTML = `<option value="">${label}</option>` + vals.map(v => `<option ${String(v) === cur ? 'selected' : ''}>${esc(v)}</option>`).join(''); };
+    fill('#cmp-class', 'Všechny třídy', [...new Set(r.rows.map(x => x.ek?.class).filter(Boolean))].sort(num));
+    fill('#cmp-year', 'Všechny ročníky', [...new Set(r.rows.map(x => x.ek?.year).filter(y => y !== null && y !== undefined))].sort(num));
+    const c = r.counts, n = k => c[k] || 0;
+    const tile = (label, val, st, diff = '') => `<div class="stat" style="cursor:pointer" onclick="$('#cmp-status').value='${st}';$('#cmp-diff').value='${diff}';renderCompare()"><span class="mute">${label}</span><b>${val}</b></div>`;
+    $('#cmp-stats').innerHTML = tile('V pořádku', n('ok'), 'ok') + tile('Rozdíl', n('diff'), 'diff') +
+      tile('Chybí v AD', n('ek_only'), 'ek_only') + tile('Navíc aktivní v AD', n('ad_only'), 'ad_only') +
+      tile('Karta', n('d:karta'), 'diff', 'karta') + tile('Skupina', n('d:skupina'), 'diff', 'skupina') +
+      tile('Stav účtu', n('d:stav'), 'diff', 'stav') + tile('Jméno', n('d:jméno'), 'diff', 'jméno');
+    $('#cmp-info').textContent = `Edookit ${r.ek_count} studentů · AD ${r.ad_count} účtů · párování přes edookitPersonID, jinak jednoznačná shoda jména · ` +
+      `${new Date(r.ad_loaded).toLocaleTimeString('cs-CZ')}` + (r.warnings.length ? ` · ⚠ ${r.warnings.join('; ')}` : '') + ' · data se neukládají.';
+    renderCompare();
+  } catch (e) { $('#cmp-info').textContent = '❌ ' + e.message; }
+}
+function renderCompare() {
+  if (!CMP) return;
+  const q = $('#cmp-q').value.toLowerCase(), st = $('#cmp-status').value, df = $('#cmp-diff').value,
+    cl = $('#cmp-class').value, yr = $('#cmp-year').value;
+  const list = CMP.rows.filter(x =>
+    (!st || (st === 'problems' ? ['diff', 'ek_only', 'ad_only'].includes(x.status) : x.status === st)) &&
+    (!df || x.diffs.includes(df)) && (!cl || x.ek?.class === cl) && (!yr || String(x.ek?.year) === yr) &&
+    (!q || [x._name, x.ad?.login, x.ad?.name, x.ek?.id, x.ad?.edookit_id, x.ek?.card, x.ad?.card_edookit, x.ad?.card_ad,
+      x.ek?.class, x.ek?.schedule_group, x.ad?.class].join(' ').toLowerCase().includes(q)));
+  const bad = (x, f) => x.diffs.includes(f) ? ' class="bad"' : '';
+  const dash = '<span class="mute">—</span>';
+  const act = (v, label) => v ? `<span class="pill ACTIVE">${label}</span>` : `<span class="pill DEACTIVATED">${label}</span>`;
+  $('#cmp-rows').innerHTML = list.slice(0, 1000).map(x => {
+    const e = x.ek, a = x.ad, [lbl, cls] = CMP_ST[x.status];
+    return `<tr class="click" onclick="openCompare(${CMP.rows.indexOf(x)})">
+      <td><span class="pill ${cls}">${lbl}</span>${x.diffs.length ? `<div class="mute" style="font-size:12px">${x.diffs.map(esc).join(', ')}</div>` : ''}</td>
+      <td${bad(x, 'jméno')}>${e ? `<b>${esc(e.last_name)} ${esc(e.first_name)}</b><div class="mute" style="font-size:12px">ID ${esc(e.id)}</div>` : dash}</td>
+      <td${bad(x, 'jméno') || bad(x, 'edookit id')}>${a ? `${esc(a.last_name || '')} ${esc(a.first_name || '')}<div class="mute" style="font-size:12px">${esc(a.login)}${a.edookit_id ? ' · ID ' + esc(a.edookit_id) : ' · bez Edookit ID'}</div>` : dash}</td>
+      <td${bad(x, 'skupina')}>${e?.schedule_group ? `<span class="pill role">${esc(e.schedule_group)}</span>` : dash}</td>
+      <td${bad(x, 'skupina')}>${a?.class ? esc(a.class) : dash}</td>
+      <td${bad(x, 'karta')}>${e?.card ? esc(e.card) : dash}</td>
+      <td${bad(x, 'karta')}>${a?.card_edookit ? `${esc(a.card_edookit)} <span class="mute" title="hodnota v AD (otherPager)">(AD ${esc(a.card_ad)})</span>` : dash}</td>
+      <td${bad(x, 'stav')}>${e ? act(e.active !== false, e.active !== false ? 'aktivní' : 'neaktivní') : dash} / ${a ? act(a.enabled && !a.excluded_ou, !a.enabled ? 'zakázán' : a.excluded_ou ? 'vyřazen (OU)' : 'aktivní') : dash}</td></tr>`;
+  }).join('') || '<tr><td colspan="8" class="mute">Nic nenalezeno</td></tr>';
+  if (list.length > 1000) $('#cmp-rows').insertAdjacentHTML('beforeend', `<tr><td colspan="8" class="mute">… a dalších ${list.length - 1000} – upřesněte filtr</td></tr>`);
+  $('#cmp-info').dataset.shown = list.length;
+}
+function openCompare(i) {
+  const x = CMP.rows[i], e = x.ek || {}, a = x.ad || {};
+  const rowsKv = [
+    ['Jméno', `${e.first_name || ''} ${e.last_name || ''}`, `${a.first_name || ''} ${a.last_name || ''}`, 'jméno'],
+    ['Edookit ID', e.id, a.edookit_id, 'edookit id'],
+    ['Třída / skupina', [e.class, e.schedule_group].filter(Boolean).join(' → '), a.class, 'skupina'],
+    ['Karta (Edookit tvar)', e.card, a.card_edookit, 'karta'],
+    ['Karta v AD (otherPager)', e.card ? null : '', a.card_ad, 'karta'],
+    ['Stav', x.ek ? (e.active !== false ? 'aktivní' : 'neaktivní') : '', x.ad ? (!a.enabled ? 'zakázán' : a.excluded_ou ? 'vyřazen (OU)' : 'aktivní') : '', 'stav'],
+    ['Login / e-mail v AD', '', [a.login, a.email].filter(Boolean).join(' · '), ''],
+    ['Umístění v AD', '', a.dn, ''],
+  ];
+  const v = t => t === null || t === undefined || t === '' ? '<span class="mute">—</span>' : esc(t);
+  $('#sTitle').textContent = `Porovnání: ${x._name}`;
+  $('#sBody').innerHTML = `<table class="mini kv"><thead><tr><th></th><th>Edookit (zdroj pravdy)</th><th>Active Directory</th></tr></thead><tbody>` +
+    rowsKv.map(([k, ev, av, f]) => `<tr${f && x.diffs.includes(f) ? ' class="bad"' : ''}><td class="mute">${k}</td><td>${v(ev)}</td><td>${v(av)}</td></tr>`).join('') +
+    `</tbody></table><div class="hint">Párováno: ${x.match === 'id' ? 'přes edookitPersonID' : x.match ? 'podle jména (v AD chybí edookitPersonID)' : 'nespárováno'}.</div>` +
+    `<div style="display:flex;gap:8px;margin-top:10px">${x.ek ? `<button class="btn sm" onclick="$('#sdlg').close();openStudent('${esc(e.id)}')">Detail v Edookitu</button>` : ''}` +
+    `${x.ad ? `<button class="btn sm" onclick="cmpOpenAd(${i})">Detail v AD</button>` : ''}</div>`;
+  $('#sdlg').showModal();
+}
+function cmpOpenAd(i) { $('#sdlg').close(); openAdUser(CMP.rows[i].ad); }
+['#cmp-q', '#cmp-status', '#cmp-diff', '#cmp-class', '#cmp-year'].forEach(s => $(s).addEventListener('input', renderCompare));
+
 // ---------- Active Directory
 const AD = {students: null, employees: null};
 async function loadAd(kind, refresh = false) {
@@ -1025,8 +1141,8 @@ function renderAd(kind) {
   if (list.length > 1000) $(`#ad${kind}-rows`).insertAdjacentHTML('beforeend', `<tr><td colspan="${cols}" class="mute">… a dalších ${list.length - 1000} – upřesněte hledání</td></tr>`);
 }
 ['students', 'employees'].forEach(k => [`#ad${k}-q`, `#ad${k}-f`, `#ad${k}-hide`].forEach(s => $(s).addEventListener('input', () => renderAd(k))));
-async function openAd(kind, i) {
-  const u = AD[kind][i];
+async function openAd(kind, i) { return openAdUser(AD[kind][i]); }
+async function openAdUser(u) {
   await run(async () => {
     const d = await api('GET', '/api/ad/user?dn=' + encodeURIComponent(u.dn));
     $('#sTitle').textContent = `${u.name} (${u.login})`;
