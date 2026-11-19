@@ -192,6 +192,23 @@
       <div class="hint" id="uIndiv"></div>
     </section>
 
+    <section class="usec admin-only">
+      <h3>Účet v aplikaci</h3>
+      <div class="row2">
+        <div><label>Typ účtu</label>
+          <select id="uAccType" style="width:100%"><option value="">Bez přístupu do aplikace</option>
+            <option value="operator">Operátor</option><option value="admin">Správce</option></select></div>
+        <div><label>Přihlašovací jméno</label><input id="uAccUser" autocomplete="off"></div>
+      </div>
+      <div id="uAccRolesBox"><label>Smí zakládat a spravovat uživatele v rolích</label><div class="checks" id="uAccRoles"></div></div>
+      <div id="uAccPwBox"><label id="uAccPwLabel">Heslo (min. 10 znaků)</label>
+        <div class="bar"><input id="uAccPw" class="grow" autocomplete="new-password">
+          <button class="btn sm" onclick="genPw()">Vygenerovat</button></div>
+        <div class="hint">Heslo předejte uživateli bezpečnou cestou; po přihlášení si ho může změnit v Nastavení.</div></div>
+      <div class="foot"><button class="btn sm danger" id="uAccDel" onclick="removeAcc()">Zrušit účet</button>
+        <button class="btn primary sm" onclick="saveAcc()">Uložit účet</button></div>
+    </section>
+
     <section class="usec">
       <h3>PIN</h3>
       <div class="bar">
@@ -273,7 +290,8 @@ const roleOptions = (sel, placeholder) => (placeholder ? `<option value="">${pla
 
 async function loadUsers() {
   await run(async () => {
-    [USERS, ROLES] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/roles')]);
+    [USERS, ROLES, ACCOUNTS] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/roles'),
+      isAdmin() ? api('GET', '/api/accounts') : Promise.resolve([])]);
     USERS.sort((a, b) => fullName(a).localeCompare(fullName(b), 'cs'));
     const cur = $('#fRole').value;
     $('#fRole').innerHTML = '<option value="">Všechny role</option>' + roleOptions(cur) +
@@ -309,7 +327,7 @@ function renderUsers() {
       <td>${esc(u.user_email) || '<span class="mute">—</span>'}</td>
       <td>${u.role_id ? `<span class="pill role">${esc(roleName(u.role_id) || '?')}</span>` : '<span class="mute">— bez role</span>'}</td>
       <td><span class="pill ${u.status}">${STATUS_CZ[u.status] || esc(u.status)}</span></td>
-      <td class="mute">${nfc ? `💳 ${nfc}` : ''} ${pin ? '🔢 PIN' : ''} ${lp ? `🚗 ${lp}` : ''}
+      <td class="mute">${accBadge(u.id)} ${nfc ? `💳 ${nfc}` : ''} ${pin ? '🔢 PIN' : ''} ${lp ? `🚗 ${lp}` : ''}
         ${(u.access_policies || []).length ? `<span title="Individuální politiky: ${esc(u.access_policies.map(p => p.name).join(', '))}">⚠ vlastní politiky</span>` : ''}</td>
       <td class="act">
         <button class="btn sm" onclick="openUser('${u.id}')">Upravit</button>
@@ -465,6 +483,7 @@ function renderUser() {
   $('#uStatus').innerHTML = `<span class="pill ${u.status}">${STATUS_CZ[u.status] || esc(u.status)}</span>`;
   $('#uFirst').value = u.first_name || ''; $('#uLast').value = u.last_name || '';
   $('#uEmail').value = u.user_email || '';
+  if (isAdmin()) renderAcc();
   $('#uRole').innerHTML = roleOptions(u.role_id, u.role_id && roleName(u.role_id) ? '' : '— bez role —');
   const r = ROLES.find(x => x.group_id === u.role_id);
   $('#uRoleInfo').textContent = r ? 'Přístup podle role: ' + (r.policies.join(', ') || 'žádné politiky ve skupině') : 'Uživatel není v žádné roli.';
@@ -648,7 +667,8 @@ async function loadAccounts() {
   await run(async () => {
     ACCOUNTS = await api('GET', '/api/accounts');
     $('#aTable').innerHTML = ACCOUNTS.map(a => `<tr>
-      <td><b>${esc(a.user)}</b> <span class="mute">${esc(a.name)}</span></td>
+      <td><b>${esc(a.user)}</b> <span class="mute">${esc(a.name)}</span>
+        ${a.ua_user_id ? `<br><a href="#" class="hint" onclick="openUser('${esc(a.ua_user_id)}');return false">↔ ${esc(fullName(USERS.find(x => x.id === a.ua_user_id) || {first_name: 'uživatel v Access'}))}</a>` : ''}</td>
       <td>${a.role === 'admin' ? '<span class="pill ACTIVE">správce</span>' : '<span class="pill">operátor</span>'}</td>
       <td class="mute">${a.role === 'admin' ? 'všechny role' : esc(a.allowed_roles.map(id => roleName(id) || '?').join(', ') || '—')}</td>
       <td class="act"><button class="btn sm" onclick="editAccount('${esc(a.user)}')">Upravit</button>
@@ -681,6 +701,52 @@ const saveAccount = () => run(async () => {
 function deleteAccount(user) {
   if (!confirm(`Smazat účet ${user}?`)) return;
   run(async () => { await api('DELETE', `/api/accounts/${encodeURIComponent(user)}`); await loadAccounts(); }, 'Účet smazán');
+}
+
+// ---------- účet v aplikaci propojený s uživatelem
+const accOf = uid => (ACCOUNTS || []).find(a => a.ua_user_id === uid);
+const accBadge = uid => { const a = isAdmin() && accOf(uid); return a ? `<span title="Účet v aplikaci: ${esc(a.user)}">🔑 ${a.role === 'admin' ? 'správce' : 'operátor'}</span>` : ''; };
+const loginFrom = u => (u.user_email || `${u.first_name || ''}.${u.last_name || ''}`).normalize('NFD')
+  .replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9@._-]/g, '');
+function renderAcc() {
+  const a = accOf(CUR.id);
+  $('#uAccType').value = a ? a.role : '';
+  $('#uAccUser').value = a ? a.user : loginFrom(CUR); $('#uAccUser').disabled = !!a;
+  $('#uAccPw').value = ''; $('#uAccPw').placeholder = a ? 'ponechat stávající' : '';
+  $('#uAccPwLabel').textContent = a ? 'Nové heslo (nepovinné)' : 'Heslo (min. 10 znaků)';
+  $('#uAccRoles').innerHTML = ROLES.map(r => `<label><input type="checkbox" value="${esc(r.group_id)}"
+      ${(a ? a.allowed_roles : [CUR.role_id]).includes(r.group_id) ? 'checked' : ''}> ${esc(r.name)}</label>`).join('')
+    || '<span class="mute">Nejdřív nastavte role v Nastavení.</span>';
+  $('#uAccDel').classList.toggle('hidden', !a || a.user === ST.user);
+  $('#uAccType').onchange();
+}
+$('#uAccType').onchange = () => {
+  const v = $('#uAccType').value, a = CUR && accOf(CUR.id);
+  $('#uAccRolesBox').classList.toggle('hidden', v !== 'operator');
+  ['#uAccPwBox'].forEach(s => $(s).classList.toggle('hidden', !v));
+  $('#uAccUser').parentElement.classList.toggle('hidden', !v && !a);
+};
+function genPw() {
+  const abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const r = crypto.getRandomValues(new Uint32Array(14));
+  $('#uAccPw').value = Array.from(r, x => abc[x % abc.length]).join('');
+}
+async function saveAcc() {
+  const type = $('#uAccType').value, a = accOf(CUR.id);
+  if (!type) return a ? removeAcc() : toast('Vyberte typ účtu', false);
+  await run(async () => {
+    const pw = $('#uAccPw').value;
+    await api('POST', '/api/accounts', {user: $('#uAccUser').value.trim(), name: fullName(CUR), password: pw, role: type,
+      ua_user_id: CUR.id, allowed_roles: [...document.querySelectorAll('#uAccRoles input:checked')].map(i => i.value)});
+    ACCOUNTS = await api('GET', '/api/accounts'); renderAcc(); renderUsers();
+    if (pw && !a) alert(`Účet vytvořen.\n\nPřihlašovací jméno: ${$('#uAccUser').value}\nHeslo: ${pw}\n\nHeslo si poznamenejte – znovu se nezobrazí.`);
+  }, 'Účet uložen');
+}
+function removeAcc() {
+  const a = accOf(CUR.id); if (!a) return;
+  if (!confirm(`Zrušit účet „${a.user}“? Uživatel se už do aplikace nepřihlásí (v UniFi Access zůstává beze změny).`)) return;
+  run(async () => { await api('DELETE', `/api/accounts/${encodeURIComponent(a.user)}`);
+    ACCOUNTS = await api('GET', '/api/accounts'); renderAcc(); renderUsers(); }, 'Účet zrušen');
 }
 
 (async () => { await loadStatus(); await loadUsers(); loadVersion(); })();
