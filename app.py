@@ -403,6 +403,30 @@ def invalidate_members():
     _members["t"] = 0.0
 
 
+async def group_policy_ids(gids) -> dict[str, set[str]]:
+    out = {}
+    for gid in {g for g in gids if g}:
+        try:
+            out[gid] = {p.get("id") for p in (await ua.request("GET", f"/user_groups/{gid}/access_policies"))["data"] or []}
+        except HTTPException:
+            out[gid] = set()
+    return out
+
+
+async def own_policies(uid: str) -> list[dict]:
+    """Politiky přiřazené přímo uživateli (bez zděděných ze skupiny)."""
+    data = (await ua.request("GET", f"/users/{uid}/access_policies", params={"only_user_policies": "true"}))["data"]
+    return [{"id": p.get("id"), "name": p.get("name")} for p in data or []]
+
+
+async def clear_own_policies(uid: str) -> int:
+    """Přístup jen přes roli: odebere uživateli přímo přiřazené politiky."""
+    own = await own_policies(uid)
+    if own:
+        await ua.request("PUT", f"/users/{uid}/access_policies", json={"access_policy_ids": []})
+    return len(own)
+
+
 def can_manage(cfg: dict, acc: dict, role_id: str | None) -> bool:
     """Správce vše; operátor uživatele ve svých rolích, s volbou see_all i uživatele bez role."""
     if acc.get("role") == "admin":
@@ -721,9 +745,13 @@ async def users(who: str = Depends(auth)):
     acc = get_account(cfg, who)
     allowed = allowed_role_ids(cfg, acc)
     m = await membership(force=True)
+    gp = await group_policy_ids(set(m.values()))
     out = []
     for u in await ua.all_pages("/users", {"expand[]": "access_policy"}):
         u["role_id"] = m.get(u.get("id"))
+        inherited = gp.get(u["role_id"], set())
+        u["own_policies"] = [{"id": p.get("id"), "name": p.get("name")}
+                             for p in u.get("access_policies") or [] if p.get("id") not in inherited]
         if can_view(cfg, acc, u["role_id"]):
             u["can_manage"] = can_manage(cfg, acc, u["role_id"])
             out.append(u)
@@ -754,6 +782,10 @@ async def create_user(u: NewUser, who: str = Depends(auth)):
     if u.role_id:
         await ua.request("POST", f"/user_groups/{u.role_id}/users", json=[uid])
         invalidate_members()
+        try:   # výchozí politika UniFi Access se novému uživateli přiřadí automaticky – přístup jen přes roli
+            await clear_own_policies(uid)
+        except HTTPException as e:
+            print(f"[roles] nelze odebrat výchozí politiku novému uživateli: {e.detail}", flush=True)
     if u.pin_code:
         await ua.request("PUT", f"/users/{uid}/pin_codes", json={"pin_code": u.pin_code})
     audit(who, "create", {"user_id": uid, "name": f"{u.first_name} {u.last_name}",
@@ -773,14 +805,30 @@ async def set_role(uid: str, r: RoleIn, who: str = Depends(auth)):
     if r.role_id not in allowed_role_ids(cfg, acc):
         raise HTTPException(403, "Do této role nemůžete uživatele přesunout")
     old = (await membership(force=True)).get(uid)
-    if old == r.role_id:
-        return {"ok": True}
-    await ua.request("POST", f"/user_groups/{r.role_id}/users", json=[uid])
-    if old:
-        await ua.request("POST", f"/user_groups/{old}/users/delete", json=[uid])
-    invalidate_members()
-    audit(who, "role", {"user_id": uid, "from": role_name(cfg, old), "to": role_name(cfg, r.role_id)})
-    return {"ok": True}
+    if old != r.role_id:
+        await ua.request("POST", f"/user_groups/{r.role_id}/users", json=[uid])
+        if old:
+            await ua.request("POST", f"/user_groups/{old}/users/delete", json=[uid])
+        invalidate_members()
+    removed = await clear_own_policies(uid)
+    audit(who, "role", {"user_id": uid, "from": role_name(cfg, old), "to": role_name(cfg, r.role_id),
+                        **({"own_policies_removed": removed} if removed else {})})
+    return {"ok": True, "own_policies_removed": removed}
+
+
+@app.post("/api/maintenance/clear-own-policies")
+async def bulk_clear_own(who: str = Depends(admin)):
+    """Všem uživatelům s rolí odebere přímo přiřazené politiky (přístup jen přes roli)."""
+    m = await membership(force=True)
+    done, failed = 0, []
+    for uid in m:
+        try:
+            if await clear_own_policies(uid):
+                done += 1
+        except HTTPException as e:
+            failed.append(f"{uid}: {e.detail}")
+    audit(who, "clear_own_policies", {"users": done, "failed": len(failed)})
+    return {"ok": True, "cleared": done, "failed": failed[:10]}
 
 
 @app.put("/api/users/{uid}/status")
@@ -983,6 +1031,12 @@ async def get_user(uid: str, who: str = Depends(auth)):
     u = (await ua.request("GET", f"/users/{uid}", params={"expand[]": "access_policy"}))["data"]
     u["role_id"] = (await membership()).get(uid)
     u["can_manage"] = can_manage(cfg, get_account(cfg, who), u["role_id"])
+    try:
+        u["own_policies"] = await own_policies(uid)
+    except HTTPException:     # starší UniFi Access bez only_user_policies – odhad z politik role
+        inh = (await group_policy_ids([u["role_id"]])).get(u["role_id"], set())
+        u["own_policies"] = [{"id": p.get("id"), "name": p.get("name")}
+                             for p in u.get("access_policies") or [] if p.get("id") not in inh]
     return u
 
 
