@@ -9,14 +9,19 @@
 <body>
 <header>
   <h1>🔐 SyncPro</h1>
-  <nav>
-    <button data-tab="users" class="on">Uživatelé</button>
-    <button data-tab="logs">Průchody</button>
-    <button data-tab="audit" class="admin-only">Audit změn</button>
-    <button data-tab="settings">Nastavení</button>
+  <nav id="modnav">
+    <button data-mod="unifi" class="on">UniFi</button>
+    <button data-mod="edookit" class="admin-only">Edookit</button>
+    <button data-mod="settings">Nastavení</button>
   </nav>
   <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="uaok" class="badge"></span><span id="who" class="mute"></span><span id="ver" class="mute" style="font-size:12px"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
 </header>
+<nav id="subnav" class="subnav">
+  <button data-mod="unifi" data-tab="users" class="on">Uživatelé</button>
+  <button data-mod="unifi" data-tab="logs">Průchody</button>
+  <button data-mod="unifi" data-tab="audit" class="admin-only">Audit změn</button>
+  <button data-mod="edookit" data-tab="students" class="hidden">Studenti</button>
+</nav>
 
 <main>
   <!-- UŽIVATELÉ -->
@@ -59,6 +64,20 @@
     </table>
   </section>
 
+  <!-- EDOOKIT: STUDENTI -->
+  <section id="tab-students" class="hidden">
+    <div class="bar">
+      <input id="eq" placeholder="Hledat jméno, třídu…" class="grow">
+      <select id="eClass"><option value="">Všechny třídy</option></select>
+      <button class="btn primary" onclick="loadStudents()">↻ Načíst z Edookitu</button>
+    </div>
+    <div class="hint" id="eInfo" style="margin-bottom:8px"></div>
+    <table>
+      <thead><tr><th>Příjmení a jméno</th><th>Třída</th><th>E-mail</th><th>ID v Edookitu</th><th>Další údaje</th></tr></thead>
+      <tbody id="students"><tr><td colspan="5" class="mute">Klikněte na „Načíst z Edookitu“.</td></tr></tbody>
+    </table>
+  </section>
+
   <!-- AUDIT -->
   <section id="tab-audit" class="hidden">
     <p class="mute">Změny provedené přes toto rozhraní (ukládá se lokálně na serveru).</p>
@@ -70,6 +89,29 @@
 
   <!-- NASTAVENÍ -->
   <section id="tab-settings" class="hidden">
+    <div class="card form admin-only" style="max-width:900px">
+      <h2>Edookit</h2>
+      <div class="hint">API přístup založíte v Edookitu: Nastavení → API přístupové údaje (API modul typu „Osobní údaje studentů“
+        a přístupové údaje). Rodné číslo a jiné citlivé údaje aplikace nezobrazuje ani neukládá – v modulu je nevybírejte.</div>
+      <label>Adresa instance školy</label><input id="ekUrl" placeholder="https://skola-login.edookit.net">
+      <div class="row2">
+        <div><label>API uživatel</label><input id="ekUser" autocomplete="off"></div>
+        <div><label>API heslo</label><input id="ekPw" type="password" autocomplete="new-password" placeholder="ponechat stávající"></div>
+      </div>
+      <label>Název API modulu (nepovinné, pomáhá průzkumu)</label><input id="ekModule" placeholder="např. ImportVusers">
+      <div class="foot"><button class="btn primary" onclick="ekSave()">Uložit</button></div>
+      <h3 style="margin:18px 0 4px;font-size:14px">Průzkum API</h3>
+      <div class="hint">Edookit nemá veřejnou dokumentaci k API pro osoby. Průzkum nejdřív ověří přihlášení na známém endpointu
+        (suplování) a pak vyzkouší pravděpodobné cesty. Najdete-li cestu, která vrací seznam studentů, nastavte ji jako zdroj.</div>
+      <div id="ekSource" class="hint" style="margin-top:6px"></div>
+      <div class="bar" style="margin-top:8px">
+        <button class="btn" onclick="ekProbe()">🔍 Spustit průzkum</button>
+        <input id="ekPath" class="grow" placeholder="vlastní cesta, např. /api/…">
+        <select id="ekMethod"><option>GET</option><option>POST</option></select>
+        <button class="btn" onclick="ekProbe(true)">Zkusit</button>
+      </div>
+      <div id="ekRes" style="margin-top:10px"></div>
+    </div>
     <div class="card form admin-only" style="max-width:900px">
       <h2>Role (skupiny z UniFi Access)</h2>
       <div class="hint">Zaškrtněte skupiny, které se v aplikaci používají jako role, a případně jim dejte vlastní název.
@@ -274,13 +316,26 @@ async function run(fn, okMsg) {
 }
 
 // ---------- záložky
-document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
-  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
-  document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + b.dataset.tab));
-  if (b.dataset.tab === 'audit') loadAudit();
-  if (b.dataset.tab === 'settings' && isAdmin()) { loadSettings(); loadVersion(); loadUpdater(); loadGroups(); loadAccounts(); }
-  if (b.dataset.tab === 'logs' && !$('#logs').children.length) loadLogs();
-});
+const LAST_TAB = {unifi: 'users', edookit: 'students', settings: 'settings'};
+function showTab(tab) {
+  document.querySelectorAll('#subnav button').forEach(x => x.classList.toggle('on', x.dataset.tab === tab));
+  document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + tab));
+  const mod = Object.keys(LAST_TAB).find(m => m === 'settings' ? tab === 'settings' :
+    document.querySelector(`#subnav button[data-tab="${tab}"]`)?.dataset.mod === m);
+  if (mod) LAST_TAB[mod] = tab;
+  if (tab === 'audit') loadAudit();
+  if (tab === 'settings' && isAdmin()) { loadSettings(); loadVersion(); loadUpdater(); loadGroups(); loadAccounts(); ekLoad(); }
+  if (tab === 'logs' && !$('#logs').children.length) loadLogs();
+  if (tab === 'students' && !STUDENTS) loadStudents();
+}
+function showMod(mod) {
+  document.querySelectorAll('#modnav button').forEach(x => x.classList.toggle('on', x.dataset.mod === mod));
+  document.querySelectorAll('#subnav button').forEach(x => x.classList.toggle('hidden', x.dataset.mod !== mod));
+  $('#subnav').classList.toggle('hidden', mod === 'settings');
+  showTab(LAST_TAB[mod]);
+}
+document.querySelectorAll('#modnav button').forEach(b => b.onclick = () => showMod(b.dataset.mod));
+document.querySelectorAll('#subnav button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
 // ---------- uživatelé
 const fullName = u => u.full_name || `${u.first_name ?? ''} ${u.last_name ?? ''}`.trim();
@@ -753,6 +808,74 @@ function removeAcc() {
   run(async () => { await api('DELETE', `/api/accounts/${encodeURIComponent(a.user)}`);
     ACCOUNTS = await api('GET', '/api/accounts'); renderAcc(); renderUsers(); }, 'Účet zrušen');
 }
+
+// ---------- Edookit
+let STUDENTS = null, EK = {};
+async function ekLoad() {
+  try { EK = await api('GET', '/api/edookit/config'); } catch { return; }
+  $('#ekUrl').value = EK.url; $('#ekUser').value = EK.username; $('#ekModule').value = EK.module || '';
+  $('#ekPw').value = ''; $('#ekPw').placeholder = EK.has_password ? 'ponechat stávající' : '';
+  $('#ekSource').innerHTML = EK.source ? `Zdroj studentů: <b>${esc(EK.source.method)} ${esc(EK.source.path)}</b> (přihlášení: ${esc(EK.source.auth)})`
+    : 'Zdroj studentů zatím není nastaven.';
+}
+const ekSave = () => run(async () => {
+  await api('POST', '/api/edookit/config', {url: $('#ekUrl').value, username: $('#ekUser').value, password: $('#ekPw').value, module: $('#ekModule').value});
+  await ekLoad();
+}, 'Edookit uložen');
+let EKRES = [];
+async function ekProbe(custom = false) {
+  if (custom && !$('#ekPath').value.trim()) return toast('Zadejte cestu', false);
+  $('#ekRes').innerHTML = '<span class="mute">⏳ Zkouším…' + (custom ? '' : ' (může trvat i minutu)') + '</span>';
+  try {
+    const r = await api('POST', '/api/edookit/probe', custom ? {path: $('#ekPath').value.trim(), method: $('#ekMethod').value} : {});
+    EKRES = r.results;
+    const st = s => s === 200 ? '<span class="pill ACTIVE">200</span>' : `<span class="pill ${s ? 'DEACTIVATED' : ''}">${s ?? 'chyba'}</span>`;
+    const row = (x, i) => `<tr>
+        <td>${st(x.status)}</td>
+        <td><code>${esc(x.method)} ${esc(x.path)}</code> <span class="mute">${esc(x.auth)}</span>
+          ${x.items != null ? `<br><b>${x.items} záznamů</b> · pole: <span class="mute">${esc((x.keys || []).join(', '))}</span>` : ''}
+          ${x.location ? `<br><span class="mute">→ ${esc(x.location)}</span>` : ''}${x.error ? `<br><span class="mute">${esc(x.error)}</span>` : ''}
+          ${x.sample ? `<details><summary class="mute">odpověď (${esc(x.content_type || '')}, ${x.size} B)</summary><div class="fp">${esc(x.sample)}</div></details>` : ''}</td>
+        <td class="act">${x.items ? `<button class="btn sm primary" onclick="ekUse(${i})">Použít jako zdroj studentů</button>` : ''}</td>
+      </tr>`;
+    const main = EKRES.map((x, i) => [x, i]).filter(([x]) => x.status !== 404);
+    const miss = EKRES.map((x, i) => [x, i]).filter(([x]) => x.status === 404);
+    $('#ekRes').innerHTML = `<div class="hint">Přihlášení: <b>${esc(r.auth.join(' / '))}</b> · pokusů: ${EKRES.length} ·
+        úspěšných: ${EKRES.filter(x => x.status === 200).length} · se záznamy: ${EKRES.filter(x => x.items).length}</div>
+      <table class="mini" style="margin-top:6px"><tbody>${main.map(([x, i]) => row(x, i)).join('')}</tbody></table>` +
+      (miss.length ? `<details style="margin-top:6px"><summary class="mute">Nenalezeno (404): ${miss.length} cest</summary>
+        <div class="hint">${miss.map(([x]) => esc(x.path)).join(' · ')}</div></details>` : '');
+  } catch (e) { $('#ekRes').innerHTML = '❌ ' + esc(e.message); }
+}
+const ekUse = i => run(async () => {
+  const x = EKRES[i];
+  await api('POST', '/api/edookit/source', {path: x.path, method: x.method, auth: x.auth});
+  await ekLoad(); STUDENTS = null;
+}, 'Zdroj studentů nastaven');
+async function loadStudents() {
+  $('#eInfo').textContent = '⏳ Načítám z Edookitu…';
+  try {
+    const r = await api('GET', '/api/edookit/students');
+    STUDENTS = r.students.sort((a, b) => `${a.last_name} ${a.first_name}`.localeCompare(`${b.last_name} ${b.first_name}`, 'cs'));
+    const classes = [...new Set(STUDENTS.map(s => s.class).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true}));
+    const cur = $('#eClass').value;
+    $('#eClass').innerHTML = '<option value="">Všechny třídy</option>' + classes.map(c => `<option ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('');
+    $('#eInfo').textContent = `Načteno ${r.count} studentů (${new Date().toLocaleTimeString('cs-CZ')}). Data se neukládají, načítají se vždy živě.`;
+    renderStudents();
+  } catch (e) { $('#eInfo').textContent = '❌ ' + e.message; }
+}
+function renderStudents() {
+  if (!STUDENTS) return;
+  const q = $('#eq').value.toLowerCase(), cl = $('#eClass').value;
+  const list = STUDENTS.filter(s => (!cl || s.class === cl) && (!q || [s.first_name, s.last_name, s.class, s.email].join(' ').toLowerCase().includes(q)));
+  $('#students').innerHTML = list.map(s => `<tr><td><b>${esc(s.last_name)} ${esc(s.first_name)}</b></td>
+    <td>${s.class ? `<span class="pill role">${esc(s.class)}</span>` : '<span class="mute">—</span>'}</td>
+    <td>${esc(s.email) || '<span class="mute">—</span>'}</td><td class="mute">${esc(s.id)}</td>
+    <td class="mute" style="font-size:12px">${esc(Object.entries(s.extra || {}).filter(([k, v]) => v !== null && v !== '').map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' · ').slice(0, 160))}</td></tr>`).join('')
+    || '<tr><td colspan="5" class="mute">Nic nenalezeno</td></tr>';
+  $('#eInfo').dataset.shown = list.length;
+}
+['#eq', '#eClass'].forEach(s => $(s).addEventListener('input', renderStudents));
 
 (async () => { await loadStatus(); await loadUsers(); loadVersion(); })();
 </script>

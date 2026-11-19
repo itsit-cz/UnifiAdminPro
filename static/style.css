@@ -74,3 +74,10 @@
   .checks label { display:flex; gap:8px; align-items:center; font-weight:normal; margin:4px 0; }
   dialog.readonly .usec input, dialog.readonly .usec select, dialog.readonly .usec button { pointer-events:none; opacity:.55; }
   dialog.readonly .usec details { display:none; }
+  nav.subnav { background:var(--card); border-bottom:1px solid var(--line); padding:6px 24px; display:flex; gap:4px; }
+  nav.subnav button { background:none; border:0; padding:6px 12px; font:inherit; font-size:13px; color:var(--mute); cursor:pointer; border-radius:6px; }
+  nav.subnav button.on { color:var(--txt); background:#eef0f3; font-weight:600; }
+  nav.subnav.hidden, nav.subnav button.hidden { display:none; }
+  code { font-size:12px; }
+  .form .bar select, .form .bar input:not(.grow) { width:auto; }
+  .form .bar .grow { flex:1; width:auto; }
