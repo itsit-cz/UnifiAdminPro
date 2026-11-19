@@ -1,9 +1,9 @@
 # Žádné proměnné prostředí – vše se nastaví v průvodci instalací v prohlížeči.
 # Instalační kód najdete v logu kontejneru po prvním spuštění.
+# Image se sestavuje automaticky na GitHubu (Actions → ghcr.io) – Portainer jen stahuje.
 services:
   unifiadminpro:
-    build: .
-    image: unifiadminpro:local
+    image: ghcr.io/itsit-cz/unifiadminpro:latest
     restart: unless-stopped
     ports:
       - "8080:8080"

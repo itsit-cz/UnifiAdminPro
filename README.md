@@ -17,7 +17,8 @@ ke konzoli se připojuje přímo nebo přes **WireGuard VPN z UDM**, který bě�
    - Repository URL: `https://github.com/itsit-cz/UnifiAdminPro`
    - Reference: `refs/heads/main`, Compose path: `docker-compose.yml`
    - Environment variables: **žádné**
-2. *Deploy the stack* (první sestavení cca 1 minuta).
+2. *Deploy the stack* – Portainer stáhne hotový image `ghcr.io/itsit-cz/unifiadminpro:latest`
+   (sestavuje ho GitHub Actions po každém commitu do `main`, amd64 i arm64).
 3. *Containers → unifiadminpro → Logs* – zkopírujte **instalační kód**.
 4. Otevřete `http://server:8080` a projděte průvodce:
    instalační kód → název lokality a správce → adresa konzole, API token, WireGuard → *Otestovat* → *Dokončit*.
@@ -48,6 +49,7 @@ pip install -r requirements.txt
 DATA_DIR=./data KEYS_DIR=./keys uvicorn app:app --reload --port 8080
 ```
 (Pro WireGuard je potřeba binárka `wireproxy` v PATH nebo `WIREPROXY_BIN`.)
+Lokální sestavení image: `docker build -t ghcr.io/itsit-cz/unifiadminpro:latest .`
 
 ## Plán
 - 2FA (TOTP), více správců
