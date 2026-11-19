@@ -1015,6 +1015,221 @@ async def accounts_delete(user: str, who: str = Depends(admin)):
     return {"ok": True}
 
 
+
+# ---------------------------------------------------------------- Edookit
+# Veřejně dokumentované jsou jen služby /api/public (akce) a /api/scheduler (suplování).
+# API modul „Osobní údaje studentů“ (Nastavení > API přístupové údaje) nemá veřejnou dokumentaci,
+# proto aplikace nabízí průzkum: vyzkouší kandidátní cesty a způsoby přihlášení a ukáže odpovědi.
+EDOOKIT_SENSITIVE = {"personalnumber", "idcardnumber", "passportnumber", "healthinsurancecompanycode",
+                     "rodnecislo", "birthnumber"}
+
+
+class EdookitCfgIn(BaseModel):
+    url: str
+    username: str = ""
+    password: str = ""
+    module: str = ""
+
+
+class EdookitProbeIn(BaseModel):
+    path: str | None = None       # vlastní cesta; bez ní se zkouší kandidáti
+    method: str = "GET"
+
+
+class EdookitSourceIn(BaseModel):
+    path: str
+    method: str = "GET"
+    auth: str = "basic"           # basic | query | none
+
+
+def ek_cfg() -> dict:
+    return (load_cfg() or {}).get("edookit") or {}
+
+
+def ek_candidates(module: str) -> list[str]:
+    paths = ["/api/public/v1/events", "/api/scheduler/v1/change", "/api/lesson/v2/list-lessons",
+             "/api", "/api/doc", "/api/docs", "/api/swagger.json", "/api/openapi.json"]
+    for res in ("student", "students", "person", "persons", "personal-data", "student-personal-data", "user", "users"):
+        for v in ("v1", "v2"):
+            paths += [f"/api/{res}/{v}/list", f"/api/{res}/{v}/list-{res}" if not res.endswith("s") else f"/api/{res}/{v}/list"]
+    paths += ["/api/student/v1/list-students", "/api/student/v2/list-students", "/api/person/v1/list-persons",
+              "/api/person/v2/list-persons", "/api/student/v1/personal-data", "/api/student/v2/personal-data"]
+    if module:
+        for v in ("", "/v1", "/v2"):
+            paths += [f"/api/{module}{v}", f"/api/module{v}/{module}", f"/api/modules{v}/{module}", f"/api/custom{v}/{module}"]
+    seen, out = set(), []
+    for x in paths:
+        if x not in seen:
+            seen.add(x); out.append(x)
+    return out
+
+
+async def ek_request(path: str, method: str = "GET", auth: str = "basic", timeout: int = 20) -> httpx.Response:
+    c = ek_cfg()
+    if not c.get("url"):
+        raise HTTPException(400, "Edookit není nastaven (Nastavení → Edookit)")
+    user, pw = c.get("username", ""), dec(c.get("password")) or ""
+    kw: dict = {"params": {}}
+    if auth == "basic" and user:
+        kw["auth"] = (user, pw)
+    elif auth == "query" and user:
+        kw["params"] = {"username": user, "password": pw}
+    async with httpx.AsyncClient(base_url=c["url"].rstrip("/"), timeout=timeout, follow_redirects=False,
+                                 headers={"Accept": "application/json"}) as cl:
+        return await cl.request(method, path if path.startswith("/") else "/" + path, **kw)
+
+
+def ek_find_list(data):
+    """Najde v odpovědi seznam záznamů (list slovníků) – přímo, nebo v prvním poli objektu."""
+    if isinstance(data, list) and (not data or isinstance(data[0], dict)):
+        return data
+    if isinstance(data, dict):
+        for k in ("data", "items", "students", "persons", "result", "results", "rows", "list"):
+            if isinstance(data.get(k), list):
+                return ek_find_list(data[k])
+        for v in data.values():
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                return v
+            if isinstance(v, dict):
+                r = ek_find_list(v)
+                if r is not None:
+                    return r
+    return None
+
+
+def ek_mask(text: str) -> str:
+    c = ek_cfg()
+    pw = dec(c.get("password")) or ""
+    return text.replace(pw, "***") if pw else text
+
+
+def ek_scrub(row: dict) -> dict:
+    return {k: ("•••" if k.lower() in EDOOKIT_SENSITIVE else v) for k, v in row.items()}
+
+
+@app.get("/api/edookit/config")
+async def ek_config_get(_: str = Depends(admin)):
+    c = ek_cfg()
+    return {"url": c.get("url", ""), "username": c.get("username", ""), "module": c.get("module", ""),
+            "has_password": bool(c.get("password")), "source": c.get("source")}
+
+
+@app.post("/api/edookit/config")
+async def ek_config_save(e: EdookitCfgIn, who: str = Depends(admin)):
+    cfg = load_cfg()
+    old = cfg.get("edookit") or {}
+    url = e.url.strip().rstrip("/")
+    if url and not url.startswith("http"):
+        url = "https://" + url
+    if not url.startswith("https://"):
+        raise HTTPException(400, "Zadejte adresu instance, např. https://skola-login.edookit.net")
+    cfg["edookit"] = {**old, "url": url, "username": e.username.strip(), "module": e.module.strip(),
+                      "password": enc(e.password) if e.password else old.get("password")}
+    save_cfg(cfg)
+    audit(who, "edookit_config", {"url": url, "username": e.username.strip()})
+    return {"ok": True}
+
+
+async def ek_try(path: str, method: str, auth: str) -> dict:
+    try:
+        r = await ek_request(path, method, auth, timeout=15)
+    except httpx.HTTPError as e:
+        return {"path": path, "method": method, "auth": auth, "status": None, "error": f"{type(e).__name__}"}
+    ct = r.headers.get("content-type", "")
+    out = {"path": path, "method": method, "auth": auth, "status": r.status_code, "content_type": ct.split(";")[0],
+           "size": len(r.content), "location": r.headers.get("location")}
+    if "json" in ct:
+        try:
+            data = r.json()
+            lst = ek_find_list(data)
+            if lst is not None:
+                out["items"] = len(lst)
+                out["keys"] = sorted({k for row in lst[:50] for k in row})
+                data = {"…": f"{len(lst)} záznamů", "ukázka": [ek_scrub(x) for x in lst[:2]]}
+            out["sample"] = ek_mask(json.dumps(data, ensure_ascii=False)[:1200])
+        except ValueError:
+            out["sample"] = ek_mask(r.text[:600])
+    else:
+        out["sample"] = ek_mask(r.text[:300])
+    return out
+
+
+@app.post("/api/edookit/probe")
+async def ek_probe(p: EdookitProbeIn, who: str = Depends(admin)):
+    c = ek_cfg()
+    method = p.method.upper()
+    # 1) zjistit funkční způsob přihlášení na známém endpointu (suplování vyžaduje přihlášení)
+    auths = ["none"]
+    calib = []
+    if c.get("username"):
+        calib = [await ek_try("/api/scheduler/v1/change", "GET", a) for a in ("basic", "query")]
+        ok = [x["auth"] for x in calib if x["status"] == 200]
+        auths = ok[:1] or ["basic", "query"]
+    paths = [p.path.strip()] if p.path else [x for x in ek_candidates(c.get("module", "")) if x != "/api/scheduler/v1/change"]
+    sem = asyncio.Semaphore(4)
+
+    async def one(path, auth):
+        async with sem:
+            return await ek_try(path, method, auth)
+
+    res = calib + list(await asyncio.gather(*[one(x, a) for x in paths for a in auths]))
+    res.sort(key=lambda x: (-(x.get("items") or 0), x["status"] != 200, x["path"]))
+    print(f"[edookit] průzkum {len(res)} pokusů (přihlášení: {', '.join(auths)}), 200: "
+          f"{sum(1 for x in res if x['status'] == 200)}, seznamy: {sum(1 for x in res if x.get('items') is not None)}",
+          flush=True)
+    return {"auth": auths, "results": res}
+
+
+@app.post("/api/edookit/source")
+async def ek_source_save(src: EdookitSourceIn, who: str = Depends(admin)):
+    cfg = load_cfg()
+    cfg.setdefault("edookit", {})["source"] = {"path": src.path, "method": src.method.upper(), "auth": src.auth}
+    save_cfg(cfg)
+    audit(who, "edookit_source", {"path": src.path, "auth": src.auth})
+    return {"ok": True}
+
+
+def ek_pick(row: dict, *names):
+    low = {k.lower(): v for k, v in row.items()}
+    for n in names:
+        if n in low and low[n] not in (None, ""):
+            v = low[n]
+            return ", ".join(map(str, v)) if isinstance(v, list) else v
+    return None
+
+
+@app.get("/api/edookit/students")
+async def ek_students(_: str = Depends(admin)):
+    src = ek_cfg().get("source")
+    if not src:
+        raise HTTPException(409, "Zdroj studentů není nastaven – najděte ho průzkumem v Nastavení → Edookit")
+    try:
+        r = await ek_request(src["path"], src.get("method", "GET"), src.get("auth", "basic"), timeout=60)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Edookit nedostupný ({type(e).__name__})")
+    if r.status_code != 200:
+        raise HTTPException(502, f"Edookit vrátil HTTP {r.status_code}: {ek_mask(r.text[:200])}")
+    try:
+        lst = ek_find_list(r.json())
+    except ValueError:
+        raise HTTPException(502, "Edookit nevrátil JSON")
+    if lst is None:
+        raise HTTPException(502, "V odpovědi Edookitu není seznam záznamů")
+    rows = []
+    for x in lst:
+        rows.append({
+            "id": ek_pick(x, "personid", "id", "studentid"),
+            "first_name": ek_pick(x, "firstname", "first_name", "jmeno"),
+            "last_name": ek_pick(x, "lastname", "last_name", "surname", "prijmeni"),
+            "class": ek_pick(x, "classname", "classnames", "class", "trida"),
+            "email": ek_pick(x, "email", "mail"),
+            "extra": {k: v for k, v in x.items() if k.lower() not in EDOOKIT_SENSITIVE and k.lower() not in
+                      ("personid", "id", "firstname", "lastname", "classname", "classnames", "email", "mail")},
+        })
+    print(f"[edookit] načteno studentů: {len(rows)}", flush=True)
+    return {"count": len(rows), "students": rows}
+
+
 # ---------------------------------------------------------------- detail a úprava uživatele
 class UserEditIn(BaseModel):
     first_name: str | None = None

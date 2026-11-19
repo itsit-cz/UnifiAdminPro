@@ -40,6 +40,17 @@ Více škol na jednom hostu = více stacků; v každém změňte levou stranu po
    UDM musí být dostupné z internetu na portu WireGuard (veřejná IP, ne CGNAT).
 3. **Adresa konzole:** LAN IP konzole UniFi Access (u UDM jeho IP, např. `172.16.0.1`), port 12445.
 
+## Edookit
+Modul **Edookit → Studenti** načítá živě seznam studentů (jméno, třída, e-mail, ID osoby). Data se neukládají.
+1. V Edookitu: *Nastavení → API přístupové údaje* – API modul typu **Osobní údaje studentů** (položky Jméno, Příjmení,
+   ID osoby, Aktuální studijní skupina; rodné číslo a jiné citlivé údaje nevybírejte) a přístupové údaje.
+2. V SyncPro: *Nastavení → Edookit* – adresa instance (`https://skola-login.edookit.net`), API uživatel a heslo, název modulu.
+3. **Průzkum API** – Edookit nemá veřejnou dokumentaci API pro osoby; průzkum ověří přihlášení na endpointu suplování
+   a vyzkouší pravděpodobné cesty. Cestu vracející seznam studentů nastavte tlačítkem *Použít jako zdroj studentů*
+   (lze zadat i vlastní cestu).
+
+Citlivé položky (rodné číslo, číslo OP/pasu, pojišťovna) aplikace nezobrazuje.
+
 ## Role a účty
 1. V UniFi Access vytvořte skupiny uživatelů (např. Žáci, Učitelé) a přiřaďte jim přístupové politiky.
 2. Nastavení → **Role**: zaškrtněte skupiny, které se mají používat jako role, případně je přejmenujte.
