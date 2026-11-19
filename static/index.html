@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UniFi Access – správa uživatelů</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --line:#e3e6eb; --txt:#1d2330; --mute:#6b7383;
+          --blue:#006fff; --red:#d93636; --green:#1a9a50; --amber:#c98a00; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--txt); }
+  header { background:var(--card); border-bottom:1px solid var(--line); padding:12px 24px; display:flex; align-items:center; gap:24px; }
+  header h1 { font-size:16px; margin:0; }
+  nav button { background:none; border:0; padding:8px 12px; font:inherit; color:var(--mute); cursor:pointer; border-radius:6px; }
+  nav button.on { color:var(--blue); background:#e8f1ff; font-weight:600; }
+  main { padding:20px 24px; max-width:1300px; margin:auto; }
+  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .bar .grow { flex:1; }
+  input, select { font:inherit; padding:7px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  button.btn { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.primary { background:var(--blue); color:#fff; border-color:var(--blue); }
+  button.danger { color:var(--red); }
+  button.sm { padding:3px 8px; font-size:12px; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { background:#fafbfc; font-weight:600; color:var(--mute); font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:0; }
+  td.act { white-space:nowrap; text-align:right; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; background:#eef0f3; margin:1px 2px 1px 0; }
+  .ACTIVE { background:#e3f6ea; color:var(--green); }
+  .DEACTIVATED { background:#fde8e8; color:var(--red); }
+  .PENDING { background:#fff4d6; color:var(--amber); }
+  .mute { color:var(--mute); }
+  .stats { display:flex; gap:12px; margin-bottom:14px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 16px; min-width:130px; }
+  .stat b { display:block; font-size:22px; }
+  dialog { border:0; border-radius:10px; padding:20px 22px; width:min(480px,95vw); box-shadow:0 10px 40px rgba(0,0,0,.2); }
+  dialog h2 { margin:0 0 14px; font-size:17px; }
+  dialog label { display:block; margin:10px 0 4px; font-weight:600; font-size:13px; }
+  dialog input { width:100%; }
+  .checks { max-height:180px; overflow:auto; border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
+  .checks label { font-weight:normal; display:flex; gap:8px; margin:4px 0; }
+  .checks input { width:auto; }
+  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .foot { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
+  #toast { position:fixed; bottom:20px; right:20px; padding:10px 16px; border-radius:8px; color:#fff; display:none; max-width:420px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔐 UniFi Access</h1>
+  <nav>
+    <button data-tab="users" class="on">Uživatelé</button>
+    <button data-tab="logs">Průchody</button>
+    <button data-tab="audit">Audit změn</button>
+  </nav>
+</header>
+
+<main>
+  <!-- UŽIVATELÉ -->
+  <section id="tab-users">
+    <div class="stats" id="stats"></div>
+    <div class="bar">
+      <input id="q" placeholder="Hledat jméno, e-mail, číslo…" class="grow">
+      <select id="fStatus">
+        <option value="">Všechny stavy</option>
+        <option value="ACTIVE">Aktivní</option>
+        <option value="DEACTIVATED">Deaktivovaní</option>
+        <option value="PENDING">Čekající</option>
+      </select>
+      <select id="fPolicy"><option value="">Všechny politiky</option></select>
+      <button class="btn" onclick="loadUsers()">↻</button>
+      <button class="btn primary" onclick="openNew()">+ Přidat uživatele</button>
+    </div>
+    <table>
+      <thead><tr><th>Jméno</th><th>E-mail</th><th>Os. číslo</th><th>Stav</th><th>Přístupové politiky</th><th>Údaje</th><th></th></tr></thead>
+      <tbody id="users"></tbody>
+    </table>
+  </section>
+
+  <!-- PRŮCHODY -->
+  <section id="tab-logs" class="hidden">
+    <div class="bar">
+      <select id="lHours">
+        <option value="1">Poslední hodina</option>
+        <option value="24" selected>Posledních 24 h</option>
+        <option value="168">Posledních 7 dní</option>
+        <option value="720">Posledních 30 dní</option>
+      </select>
+      <select id="lUser"><option value="">Všichni uživatelé</option></select>
+      <input id="lq" placeholder="Filtrovat dveře / výsledek…" class="grow">
+      <button class="btn primary" onclick="loadLogs()">Načíst</button>
+    </div>
+    <table>
+      <thead><tr><th>Čas</th><th>Uživatel</th><th>Dveře</th><th>Výsledek</th><th>Způsob</th></tr></thead>
+      <tbody id="logs"></tbody>
+    </table>
+  </section>
+
+  <!-- AUDIT -->
+  <section id="tab-audit" class="hidden">
+    <p class="mute">Změny provedené přes toto rozhraní (ukládá se lokálně na serveru).</p>
+    <table>
+      <thead><tr><th>Čas</th><th>Kdo</th><th>Akce</th><th>Detail</th></tr></thead>
+      <tbody id="audit"></tbody>
+    </table>
+  </section>
+</main>
+
+<!-- dialog: nový uživatel / úprava politik -->
+<dialog id="dlg">
+  <form method="dialog" onsubmit="return false">
+    <h2 id="dlgTitle"></h2>
+    <div id="dlgNewFields">
+      <div class="row2">
+        <div><label>Jméno *</label><input id="fFirst" required></div>
+        <div><label>Příjmení *</label><input id="fLast" required></div>
+      </div>
+      <label>E-mail</label><input id="fEmail" type="email">
+      <div class="row2">
+        <div><label>Osobní číslo</label><input id="fEmp"></div>
+        <div><label>PIN (4–8 číslic)</label><input id="fPin" inputmode="numeric" pattern="\d{4,8}"></div>
+      </div>
+    </div>
+    <label>Přístupové politiky</label>
+    <div class="checks" id="fPolicies"></div>
+    <div class="foot">
+      <button class="btn" onclick="dlg.close()">Zrušit</button>
+      <button class="btn primary" id="dlgSave">Uložit</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+let USERS = [], POLICIES = [];
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const STATUS_CZ = {ACTIVE:'Aktivní', DEACTIVATED:'Deaktivován', PENDING:'Čeká'};
+const dlg = $('#dlg');
+
+async function api(method, url, body) {
+  const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: body && JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || r.statusText);
+  return j;
+}
+function toast(msg, ok = true) {
+  const t = $('#toast'); t.textContent = msg; t.style.background = ok ? 'var(--green)' : 'var(--red)';
+  t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 4000);
+}
+async function run(fn, okMsg) {
+  try { await fn(); if (okMsg) toast(okMsg); } catch (e) { toast(e.message, false); }
+}
+
+// ---------- záložky
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + b.dataset.tab));
+  if (b.dataset.tab === 'audit') loadAudit();
+  if (b.dataset.tab === 'logs' && !$('#logs').children.length) loadLogs();
+});
+
+// ---------- uživatelé
+const fullName = u => u.full_name || `${u.first_name ?? ''} ${u.last_name ?? ''}`.trim();
+const userPolicies = u => (u.access_policies || []).map(p => p.id);
+
+async function loadUsers() {
+  await run(async () => {
+    [USERS, POLICIES] = await Promise.all([api('GET', '/api/users'), api('GET', '/api/policies')]);
+    USERS.sort((a, b) => fullName(a).localeCompare(fullName(b), 'cs'));
+    $('#fPolicy').innerHTML = '<option value="">Všechny politiky</option>' +
+      POLICIES.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+    $('#lUser').innerHTML = '<option value="">Všichni uživatelé</option>' +
+      USERS.map(u => `<option value="${u.id}">${esc(fullName(u))}</option>`).join('');
+    renderUsers();
+  });
+}
+
+function renderUsers() {
+  const q = $('#q').value.toLowerCase(), st = $('#fStatus').value, pol = $('#fPolicy').value;
+  const list = USERS.filter(u =>
+    (!st || u.status === st) &&
+    (!pol || userPolicies(u).includes(pol)) &&
+    (!q || [fullName(u), u.user_email, u.employee_number].join(' ').toLowerCase().includes(q)));
+
+  const cnt = s => USERS.filter(u => u.status === s).length;
+  const noPol = USERS.filter(u => u.status === 'ACTIVE' && !userPolicies(u).length).length;
+  $('#stats').innerHTML = `
+    <div class="stat"><span class="mute">Celkem</span><b>${USERS.length}</b></div>
+    <div class="stat"><span class="mute">Aktivní</span><b>${cnt('ACTIVE')}</b></div>
+    <div class="stat"><span class="mute">Deaktivovaní</span><b>${cnt('DEACTIVATED')}</b></div>
+    <div class="stat" title="Aktivní uživatelé bez přiřazené politiky"><span class="mute">Bez politiky ⚠</span><b>${noPol}</b></div>`;
+
+  $('#users').innerHTML = list.map(u => {
+    const nfc = (u.nfc_cards || []).length, pin = u.pin_code && (u.pin_code.token || u.pin_code);
+    const active = u.status === 'ACTIVE';
+    return `<tr>
+      <td><b>${esc(fullName(u))}</b></td>
+      <td>${esc(u.user_email) || '<span class="mute">—</span>'}</td>
+      <td>${esc(u.employee_number) || '<span class="mute">—</span>'}</td>
+      <td><span class="pill ${u.status}">${STATUS_CZ[u.status] || esc(u.status)}</span></td>
+      <td>${(u.access_policies || []).map(p => `<span class="pill">${esc(p.name)}</span>`).join('') || '<span class="mute">žádná</span>'}</td>
+      <td class="mute">${nfc ? `💳 ${nfc}` : ''} ${pin ? '🔢 PIN' : ''}</td>
+      <td class="act">
+        <button class="btn sm" onclick="openPolicies('${u.id}')">Politiky</button>
+        <button class="btn sm" onclick="setPin('${u.id}')">PIN</button>
+        <button class="btn sm" onclick="toggleStatus('${u.id}','${active ? 'DEACTIVATED' : 'ACTIVE'}')">${active ? 'Deaktivovat' : 'Aktivovat'}</button>
+        <button class="btn sm danger" onclick="delUser('${u.id}')">Smazat</button>
+      </td></tr>`;
+  }).join('') || '<tr><td colspan="7" class="mute">Nic nenalezeno</td></tr>';
+}
+['#q', '#fStatus', '#fPolicy'].forEach(s => $(s).addEventListener('input', renderUsers));
+
+function policyChecks(selected = []) {
+  $('#fPolicies').innerHTML = POLICIES.map(p =>
+    `<label><input type="checkbox" value="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`
+  ).join('') || '<span class="mute">Žádné politiky v UniFi Access</span>';
+}
+const checkedPolicies = () => [...document.querySelectorAll('#fPolicies input:checked')].map(i => i.value);
+
+function openNew() {
+  $('#dlgTitle').textContent = 'Nový uživatel';
+  $('#dlgNewFields').classList.remove('hidden');
+  ['#fFirst', '#fLast', '#fEmail', '#fEmp', '#fPin'].forEach(s => $(s).value = '');
+  policyChecks();
+  $('#dlgSave').onclick = () => run(async () => {
+    const body = {first_name: $('#fFirst').value.trim(), last_name: $('#fLast').value.trim(),
+      user_email: $('#fEmail').value.trim() || null, employee_number: $('#fEmp').value.trim() || null,
+      pin_code: $('#fPin').value.trim() || null, access_policy_ids: checkedPolicies()};
+    if (!body.first_name || !body.last_name) throw new Error('Vyplňte jméno a příjmení');
+    if (body.pin_code && !/^\d{4,8}$/.test(body.pin_code)) throw new Error('PIN musí mít 4–8 číslic');
+    await api('POST', '/api/users', body);
+    dlg.close(); await loadUsers();
+  }, 'Uživatel vytvořen');
+  dlg.showModal();
+}
+
+function openPolicies(id) {
+  const u = USERS.find(x => x.id === id);
+  $('#dlgTitle').textContent = 'Politiky – ' + fullName(u);
+  $('#dlgNewFields').classList.add('hidden');
+  policyChecks(userPolicies(u));
+  $('#dlgSave').onclick = () => run(async () => {
+    await api('PUT', `/api/users/${id}/policies`, {access_policy_ids: checkedPolicies()});
+    dlg.close(); await loadUsers();
+  }, 'Politiky uloženy');
+  dlg.showModal();
+}
+
+function setPin(id) {
+  const pin = prompt('Nový PIN (4–8 číslic):');
+  if (pin === null) return;
+  run(async () => { await api('PUT', `/api/users/${id}/pin`, {pin_code: pin.trim()}); await loadUsers(); }, 'PIN nastaven');
+}
+
+function toggleStatus(id, status) {
+  const u = USERS.find(x => x.id === id);
+  if (status === 'DEACTIVATED' && !confirm(`Deaktivovat ${fullName(u)}? Ztratí přístup ke všem dveřím.`)) return;
+  run(async () => { await api('PUT', `/api/users/${id}/status`, {status}); await loadUsers(); },
+      status === 'ACTIVE' ? 'Aktivováno' : 'Deaktivováno');
+}
+
+function delUser(id) {
+  const u = USERS.find(x => x.id === id);
+  if (!confirm(`Trvale smazat ${fullName(u)}?\nTuto akci nelze vrátit. (Pro dočasné odebrání použijte Deaktivovat.)`)) return;
+  run(async () => { await api('DELETE', `/api/users/${id}`); await loadUsers(); }, 'Uživatel smazán');
+}
+
+// ---------- průchody
+let LOGS = [];
+async function loadLogs() {
+  await run(async () => {
+    const p = new URLSearchParams({hours: $('#lHours').value});
+    if ($('#lUser').value) p.set('user_id', $('#lUser').value);
+    LOGS = await api('GET', '/api/logs?' + p);
+    renderLogs();
+  });
+}
+function renderLogs() {
+  const q = $('#lq').value.toLowerCase();
+  const fmt = t => t ? new Date(typeof t === 'number' ? t * 1000 : t).toLocaleString('cs-CZ') : '';
+  $('#logs').innerHTML = LOGS.filter(l => !q || [l.door, l.result, l.user].join(' ').toLowerCase().includes(q))
+    .map(l => {
+      const ok = /ACCESS|SUCCESS/i.test(l.result || '') && !/BLOCK|DENI|FAIL/i.test(l.result || '');
+      return `<tr><td>${fmt(l.time)}</td><td>${esc(l.user) || '<span class="mute">—</span>'}</td>
+        <td>${esc(l.door)}</td><td><span class="pill ${ok ? 'ACTIVE' : 'DEACTIVATED'}">${esc(l.result)}</span></td>
+        <td class="mute">${esc(l.method)}</td></tr>`;
+    }).join('') || '<tr><td colspan="5" class="mute">Žádné záznamy</td></tr>';
+}
+$('#lq').addEventListener('input', renderLogs);
+
+// ---------- audit
+async function loadAudit() {
+  await run(async () => {
+    const rows = await api('GET', '/api/audit');
+    const name = id => { const u = USERS.find(x => x.id === id); return u ? fullName(u) : id; };
+    $('#audit').innerHTML = rows.map(r => {
+      const {ts, who, action, ...d} = r;
+      if (d.user_id) d.user = d.name || name(d.user_id);
+      if (d.policies) d.policies = d.policies.map(id => (POLICIES.find(p => p.id === id) || {}).name || id).join(', ');
+      delete d.user_id; delete d.name;
+      return `<tr><td>${new Date(ts).toLocaleString('cs-CZ')}</td><td>${esc(who)}</td><td>${esc(action)}</td>
+        <td class="mute">${esc(Object.entries(d).map(([k, v]) => `${k}: ${v}`).join(' · '))}</td></tr>`;
+    }).join('') || '<tr><td colspan="4" class="mute">Zatím žádné změny</td></tr>';
+  });
+}
+
+loadUsers();
+</script>
+</body>
+</html>
