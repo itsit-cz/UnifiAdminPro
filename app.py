@@ -306,6 +306,12 @@ class UAClient:
             return body
         if r.status_code >= 400 or body.get("code") != "SUCCESS":
             msg = f"{body.get('code')}: {body.get('msg')}"
+            hints = {
+                "CODE_USER_SSO_ACCOUNT_NAME_CANNOT_EDIT": "Uživatel je propojený s účtem UI (SSO) – jméno a příjmení "
+                    "může změnit jen majitel účtu v UI Account Portalu (account.ui.com).",
+            }
+            if body.get("code") in hints:
+                msg = hints[body["code"]] + f" ({body['code']})"
             if body.get("code") == "CODE_UNAUTHORIZED":
                 msg += (" – API tokenu chybí oprávnění pro tuto akci (např. edit:user, edit:credential, "
                         "view:device). Vytvořte v Access nový token se všemi oprávněními.")
@@ -921,8 +927,8 @@ async def accounts_delete(user: str, who: str = Depends(admin)):
 
 # ---------------------------------------------------------------- detail a úprava uživatele
 class UserEditIn(BaseModel):
-    first_name: str
-    last_name: str
+    first_name: str | None = None
+    last_name: str | None = None
     user_email: str | None = None
     employee_number: str | None = None
 
@@ -956,12 +962,14 @@ async def get_user(uid: str, who: str = Depends(auth)):
 @app.put("/api/users/{uid}")
 async def edit_user(uid: str, u: UserEditIn, who: str = Depends(auth)):
     await check_scope(who, uid)
-    if not u.first_name.strip() or not u.last_name.strip():
-        raise HTTPException(400, "Jméno a příjmení jsou povinné")
-    body = {"first_name": u.first_name.strip(), "last_name": u.last_name.strip(),
-            "user_email": (u.user_email or "").strip(), "employee_number": (u.employee_number or "").strip()}
+    # posílat jen změněná pole – u SSO uživatelů nelze měnit jméno a odeslání beze změny by selhalo
+    body = {k: v.strip() for k, v in u.model_dump().items() if v is not None}
+    if "first_name" in body and not body["first_name"] or "last_name" in body and not body["last_name"]:
+        raise HTTPException(400, "Jméno a příjmení nesmí být prázdné")
+    if not body:
+        return {"ok": True}
     await ua.request("PUT", f"/users/{uid}", json=body)
-    audit(who, "edit", {"user_id": uid, "name": f"{body['first_name']} {body['last_name']}"})
+    audit(who, "edit", {"user_id": uid, "fields": ", ".join(body)})
     return {"ok": True}
 
 
