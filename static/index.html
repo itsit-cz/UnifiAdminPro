@@ -71,14 +71,16 @@
   <section id="tab-students" class="hidden">
     <div class="bar">
       <input id="eq" placeholder="Hledat jméno, třídu…" class="grow">
+      <select id="eYear"><option value="">Všechny ročníky</option></select>
       <select id="eClass"><option value="">Všechny třídy</option></select>
+      <select id="eGroup"><option value="">Všechny skupiny</option></select>
       <label class="mute" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="eActive" checked> jen aktivní</label>
       <button class="btn primary" onclick="loadStudents(true)">↻ Načíst z Edookitu</button>
     </div>
     <div class="hint" id="eInfo" style="margin-bottom:8px"></div>
     <table>
-      <thead><tr><th>Příjmení a jméno</th><th>Třída</th><th>Stav</th><th>E-mail</th><th>Karta</th><th>ID v Edookitu</th></tr></thead>
-      <tbody id="students"><tr><td colspan="6" class="mute">Klikněte na „Načíst z Edookitu“.</td></tr></tbody>
+      <thead><tr><th>Příjmení a jméno</th><th>Ročník</th><th>Třída</th><th>Skupiny</th><th>Stav</th><th>E-mail</th><th>Karta</th><th>ID v Edookitu</th></tr></thead>
+      <tbody id="students"><tr><td colspan="8" class="mute">Klikněte na „Načíst z Edookitu“.</td></tr></tbody>
     </table>
   </section>
 
@@ -931,9 +933,13 @@ async function loadStudents(refresh = false) {
     const r = await api('GET', '/api/edookit/students' + (refresh ? '?refresh=1' : ''));
     STUDENTS = r.students.sort((a, b) => `${a.last_name} ${a.first_name}`.localeCompare(`${b.last_name} ${b.first_name}`, 'cs'));
     const classes = [...new Set(STUDENTS.map(s => s.class).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true}));
-    const cur = $('#eClass').value;
-    $('#eClass').innerHTML = '<option value="">Všechny třídy</option>' + classes.map(c => `<option ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('');
-    const src = {personal: 'osobní údaje', zaci: 'žáci (Docházka)', tridy: 'třídy'};
+    const fill = (sel, label, vals) => { const cur = $(sel).value;
+      $(sel).innerHTML = `<option value="">${label}</option>` + vals.map(c => `<option ${String(c) === cur ? 'selected' : ''}>${esc(c)}</option>`).join(''); };
+    const num = (a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true});
+    fill('#eClass', 'Všechny třídy', classes);
+    fill('#eYear', 'Všechny ročníky', [...new Set(STUDENTS.map(s => s.year).filter(y => y !== null && y !== undefined && y !== ''))].sort(num));
+    fill('#eGroup', 'Všechny skupiny', [...new Set(STUDENTS.flatMap(s => s.groups || []))].sort(num));
+    const src = {personal: 'osobní údaje', zaci: 'žáci (Docházka)', tridy: 'třídy', skupiny: 'skupiny'};
     $('#eInfo').textContent = `Načteno ${r.count} studentů · zdroje: ${r.sources.map(x => src[x] || x).join(', ')} · ${new Date(r.loaded).toLocaleTimeString('cs-CZ')}` +
       (r.warnings.length ? ` · ⚠ ${r.warnings.join('; ')}` : '') + ' · data se neukládají (jen dočasně v paměti).';
     renderStudents();
@@ -942,17 +948,21 @@ async function loadStudents(refresh = false) {
 function renderStudents() {
   if (!STUDENTS) return;
   const q = $('#eq').value.toLowerCase(), cl = $('#eClass').value, onlyActive = $('#eActive').checked;
+  const yr = $('#eYear').value, gr = $('#eGroup').value;
   const list = STUDENTS.filter(s => (!cl || s.class === cl) && (!onlyActive || s.active !== false) &&
-    (!q || [s.first_name, s.last_name, s.class, s.email, s.card, s.card_number, s.id].join(' ').toLowerCase().includes(q)));
+    (!yr || String(s.year) === yr) && (!gr || (s.groups || []).includes(gr)) &&
+    (!q || [s.first_name, s.last_name, s.class, (s.groups || []).join(' '), s.email, s.card, s.card_number, s.id].join(' ').toLowerCase().includes(q)));
   $('#students').innerHTML = list.slice(0, 1000).map(s => `<tr class="click" onclick="openStudent('${esc(s.id)}')">
     <td><b>${esc(s.last_name)} ${esc(s.first_name)}</b></td>
+    <td>${s.year ?? '<span class="mute">—</span>'}</td>
     <td>${s.class ? `<span class="pill role">${esc(s.class)}</span>` : '<span class="mute">—</span>'}</td>
+    <td>${(s.groups || []).length ? s.groups.map(g => `<span class="pill">${esc(g)}</span>`).join(' ') : '<span class="mute">—</span>'}</td>
     <td>${s.active === null || s.active === undefined ? '<span class="mute">—</span>' : s.active ? '<span class="pill ACTIVE">aktivní</span>' : '<span class="pill DEACTIVATED">neaktivní</span>'}</td>
     <td>${esc(s.email) || '<span class="mute">—</span>'}</td>
     <td>${s.card ? '💳 ' + esc(s.card) + (s.card_number ? ` <span class="mute">(${esc(s.card_number)})</span>` : '') : '<span class="mute">—</span>'}</td>
     <td class="mute">${esc(s.id)}</td></tr>`).join('')
-    || '<tr><td colspan="6" class="mute">Nic nenalezeno</td></tr>';
-  if (list.length > 1000) $('#students').insertAdjacentHTML('beforeend', `<tr><td colspan="6" class="mute">… a dalších ${list.length - 1000} – upřesněte hledání</td></tr>`);
+    || '<tr><td colspan="8" class="mute">Nic nenalezeno</td></tr>';
+  if (list.length > 1000) $('#students').insertAdjacentHTML('beforeend', `<tr><td colspan="8" class="mute">… a dalších ${list.length - 1000} – upřesněte hledání</td></tr>`);
 }
 function kvTable(obj) {
   const val = v => v === null || v === undefined || v === '' ? '<span class="mute">—</span>'
@@ -972,7 +982,7 @@ async function openStudent(id) {
     $('#sdlg').showModal();
   });
 }
-['#eq', '#eClass', '#eActive'].forEach(s => $(s).addEventListener('input', renderStudents));
+['#eq', '#eClass', '#eActive', '#eYear', '#eGroup'].forEach(s => $(s).addEventListener('input', renderStudents));
 
 // ---------- Active Directory
 const AD = {students: null, employees: null};
