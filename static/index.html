@@ -23,6 +23,7 @@
   <button data-mod="unifi" data-tab="audit" class="admin-only">Audit změn</button>
   <button data-mod="edookit" data-tab="students" class="hidden">Studenti</button>
   <button data-mod="edookit" data-tab="compare" class="hidden">Porovnání s AD</button>
+  <button data-mod="edookit" data-tab="anomalies" class="hidden">Anomálie <span id="an-badge" class="pill DEACTIVATED hidden"></span></button>
   <button data-mod="ad" data-tab="adstudents" class="hidden">Studenti</button>
   <button data-mod="ad" data-tab="ademployees" class="hidden">Zaměstnanci</button>
 </nav>
@@ -106,7 +107,9 @@
         <option value="skupina">Třída / skupina</option>
         <option value="karta">Karta</option>
         <option value="stav">Stav účtu</option>
-        <option value="edookit id">Chybí Edookit ID v AD</option>
+        <option value="edookit id">Edookit ID v AD chybí / není primární</option>
+        <option value="duplicita">Nevyřešená duplicita ID</option>
+        <option value="více účtů">Více účtů v AD</option>
       </select>
       <select id="cmp-year"><option value="">Všechny ročníky</option></select>
       <select id="cmp-class"><option value="">Všechny třídy</option></select>
@@ -118,6 +121,24 @@
         <th>Karta Edookit</th><th>Karta AD</th><th>Stav Edookit / AD</th></tr></thead>
       <tbody id="cmp-rows"><tr><td colspan="8" class="mute">Načítám…</td></tr></tbody>
     </table>
+  </section>
+
+  <!-- ANOMÁLIE -->
+  <section id="tab-anomalies" class="hidden">
+    <div class="bar">
+      <input id="an-q" placeholder="Hledat jméno, ID, login…" class="grow">
+      <select id="an-status">
+        <option value="open" selected>Otevřené</option>
+        <option value="info">Informace</option>
+        <option value="done">Vyřešené / zamítnuté</option>
+        <option value="">Vše</option>
+      </select>
+      <select id="an-type"><option value="">Všechny typy</option></select>
+      <button class="btn" onclick="loadAnomalies()">↻ Obnovit</button>
+    </div>
+    <div class="hint" style="margin-bottom:8px">Anomálie se vyhodnocují při každém načtení studentů z Edookitu a při porovnání s AD.
+      Rozhodnutí se ukládají v interní databázi SyncPro a zapisují do auditu. Rodná čísla se neukládají – jen jejich otisk pro párování.</div>
+    <div id="an-list"></div>
   </section>
 
   <!-- ACTIVE DIRECTORY -->
@@ -441,6 +462,7 @@ function showTab(tab) {
   if (tab === 'logs' && !$('#logs').children.length) loadLogs();
   if (tab === 'students' && !STUDENTS) loadStudents();
   if (tab === 'compare' && !CMP) loadCompare();
+  if (tab === 'anomalies') loadAnomalies();
   if (tab === 'adstudents' && !AD.students) loadAd('students');
   if (tab === 'ademployees' && !AD.employees) loadAd('employees');
 }
@@ -969,39 +991,42 @@ async function loadStudents(refresh = false) {
   try {
     const r = await api('GET', '/api/edookit/students' + (refresh ? '?refresh=1' : ''));
     STUDENTS = r.students.sort((a, b) => `${a.last_name} ${a.first_name}`.localeCompare(`${b.last_name} ${b.first_name}`, 'cs'));
-    const classes = [...new Set(STUDENTS.map(s => s.class).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true}));
+    STUDENTS.forEach(s => { if (!s.studies || !s.studies.length) s.studies = [{class: s.class, year: s.year, schedule_no: s.schedule_no, schedule_group: s.schedule_group, schedule_group_src: s.schedule_group_src}]; });
+    const allSt = STUDENTS.flatMap(s => s.studies);
+    const classes = [...new Set(allSt.map(s => s.class).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true}));
     const fill = (sel, label, vals) => { const cur = $(sel).value;
       $(sel).innerHTML = `<option value="">${label}</option>` + vals.map(c => `<option ${String(c) === cur ? 'selected' : ''}>${esc(c)}</option>`).join(''); };
     const num = (a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true});
     fill('#eClass', 'Všechny třídy', classes);
-    fill('#eYear', 'Všechny ročníky', [...new Set(STUDENTS.map(s => s.year).filter(y => y !== null && y !== undefined && y !== ''))].sort(num));
+    fill('#eYear', 'Všechny ročníky', [...new Set(allSt.map(s => s.year).filter(y => y !== null && y !== undefined && y !== ''))].sort(num));
     $('#eSched').innerHTML = '<option value="">Všechny rozvrhové skupiny</option>' +
-      [...new Set(STUDENTS.map(s => s.schedule_no).filter(Boolean))].sort(num).map(n => `<option value="${esc(n)}">skupina ${esc(n)}</option>`).join('') +
+      [...new Set(allSt.map(s => s.schedule_no).filter(Boolean))].sort(num).map(n => `<option value="${esc(n)}">skupina ${esc(n)}</option>`).join('') +
       '<option value="-">bez skupiny (–)</option>';
     const src = {personal: 'osobní údaje', zaci: 'žáci (Docházka)', tridy: 'třídy', skupiny: 'skupiny'};
     $('#eInfo').textContent = `Načteno ${r.count} studentů · zdroje: ${r.sources.map(x => src[x] || x).join(', ')} · ${new Date(r.loaded).toLocaleTimeString('cs-CZ')}` +
       (r.group_stats && r.sources.includes('skupiny') ? ` · skupin ${r.group_stats.groups}, studentů se skupinou ${r.group_stats.students_in_groups}` +
         (r.group_stats.students_in_groups ? '' : ` (pole skupiny: ${r.group_stats.fields.join(', ') || '—'})`) : '') +
-      (r.warnings.length ? ` · ⚠ ${r.warnings.join('; ')}` : '') + ' · data se neukládají (jen dočasně v paměti).';
-    renderStudents();
+      (r.warnings.length ? ` · ⚠ ${r.warnings.join('; ')}` : '') + ' · údaje studentů se neukládají, v databázi SyncPro jsou jen vazby ID a anomálie.';
+    renderStudents(); loadAnomalies();
   } catch (e) { $('#eInfo').textContent = '❌ ' + e.message; }
 }
 function renderStudents() {
   if (!STUDENTS) return;
   const q = $('#eq').value.toLowerCase(), cl = $('#eClass').value, onlyActive = $('#eActive').checked;
   const yr = $('#eYear').value, sg = $('#eSched').value;
-  const list = STUDENTS.filter(s => (!cl || s.class === cl) && (!onlyActive || s.active !== false) &&
-    (!yr || String(s.year) === yr) && (!sg || (sg === '-' ? !s.schedule_no : s.schedule_no === sg)) &&
-    (!q || [s.first_name, s.last_name, s.class, s.schedule_group, (s.groups || []).join(' '), s.email, s.card, s.card_number, s.id].join(' ').toLowerCase().includes(q)));
+  const stOk = st => (!cl || st.class === cl) && (!yr || String(st.year) === yr) && (!sg || (sg === '-' ? !st.schedule_no : st.schedule_no === sg));
+  const list = STUDENTS.filter(s => (!onlyActive || s.active !== false) && s.studies.some(stOk) &&
+    (!q || [s.first_name, s.last_name, ...s.studies.map(x => x.class + ' ' + (x.schedule_group || '')), s.email, s.card, s.card_number, s.id, ...(s.person?.ids || [])].join(' ').toLowerCase().includes(q)));
+  const stack = (s, f) => s.studies.map(f).join('<br>');
   $('#students').innerHTML = list.slice(0, 1000).map(s => `<tr class="click" onclick="openStudent('${esc(s.id)}')">
-    <td><b>${esc(s.last_name)} ${esc(s.first_name)}</b></td>
-    <td>${s.year ?? '<span class="mute">—</span>'}</td>
-    <td>${s.class ? `<span class="pill role">${esc(s.class)}</span>` : '<span class="mute">—</span>'}</td>
-    <td>${s.schedule_no ? `<span class="pill role" title="Edookit: ${esc(s.schedule_group_src)} · AD: ${esc(s.schedule_group)}">${esc(s.schedule_no)}</span>` : '<span class="mute">—</span>'}</td>
+    <td><b>${esc(s.last_name)} ${esc(s.first_name)}</b>${s.studies.length > 1 ? ' <span class="pill PENDING" title="Student studuje více oborů – v AD dostane skupiny všech studií, hlavní je vyšší ročník">' + s.studies.length + ' obory</span>' : ''}${(s.person?.ids || []).length > 1 ? ` <span class="pill DEACTIVATED" title="Sloučeno – stejná osoba pod ID ${esc(s.person.ids.join(', '))}">více ID</span>` : ''}</td>
+    <td>${stack(s, x => x.year ?? '<span class="mute">—</span>')}</td>
+    <td>${stack(s, x => x.class ? `<span class="pill role">${esc(x.class)}</span>` : '<span class="mute">—</span>')}</td>
+    <td>${stack(s, x => x.schedule_no ? `<span class="pill role" title="Edookit: ${esc(x.schedule_group_src)} · AD: ${esc(x.schedule_group)}">${esc(x.schedule_no)}</span>` : '<span class="mute">—</span>')}</td>
     <td>${s.active === null || s.active === undefined ? '<span class="mute">—</span>' : s.active ? '<span class="pill ACTIVE">aktivní</span>' : '<span class="pill DEACTIVATED">neaktivní</span>'}</td>
     <td>${esc(s.email) || '<span class="mute">—</span>'}</td>
     <td>${s.card ? '💳 ' + esc(s.card) + (s.card_number ? ` <span class="mute">(${esc(s.card_number)})</span>` : '') : '<span class="mute">—</span>'}</td>
-    <td class="mute">${esc(s.id)}</td></tr>`).join('')
+    <td class="mute">${esc(s.id)}${(s.person?.ids || []).length > 1 ? `<div style="font-size:12px">osoba: ${esc(s.person.ids.join(', '))}${s.person.primary ? ' · primární ' + esc(s.person.primary) : ''}</div>` : ''}</td></tr>`).join('')
     || '<tr><td colspan="8" class="mute">Nic nenalezeno</td></tr>';
   if (list.length > 1000) $('#students').insertAdjacentHTML('beforeend', `<tr><td colspan="8" class="mute">… a dalších ${list.length - 1000} – upřesněte hledání</td></tr>`);
 }
@@ -1041,14 +1066,16 @@ async function loadCompare(refresh = false) {
     const num = (a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true});
     const fill = (sel, label, vals) => { const cur = $(sel).value;
       $(sel).innerHTML = `<option value="">${label}</option>` + vals.map(v => `<option ${String(v) === cur ? 'selected' : ''}>${esc(v)}</option>`).join(''); };
-    fill('#cmp-class', 'Všechny třídy', [...new Set(r.rows.map(x => x.ek?.class).filter(Boolean))].sort(num));
-    fill('#cmp-year', 'Všechny ročníky', [...new Set(r.rows.map(x => x.ek?.year).filter(y => y !== null && y !== undefined))].sort(num));
+    fill('#cmp-class', 'Všechny třídy', [...new Set(r.rows.flatMap(x => x.ek?.classes || []).filter(Boolean))].sort(num));
+    fill('#cmp-year', 'Všechny ročníky', [...new Set(r.rows.flatMap(x => x.ek?.years || []).filter(y => y !== null && y !== undefined))].sort(num));
     const c = r.counts, n = k => c[k] || 0;
     const tile = (label, val, st, diff = '') => `<div class="stat" style="cursor:pointer" onclick="$('#cmp-status').value='${st}';$('#cmp-diff').value='${diff}';renderCompare()"><span class="mute">${label}</span><b>${val}</b></div>`;
     $('#cmp-stats').innerHTML = tile('V pořádku', n('ok'), 'ok') + tile('Rozdíl', n('diff'), 'diff') +
       tile('Chybí v AD', n('ek_only'), 'ek_only') + tile('Navíc aktivní v AD', n('ad_only'), 'ad_only') +
       tile('Karta', n('d:karta'), 'diff', 'karta') + tile('Skupina', n('d:skupina'), 'diff', 'skupina') +
-      tile('Stav účtu', n('d:stav'), 'diff', 'stav') + tile('Jméno', n('d:jméno'), 'diff', 'jméno');
+      tile('Stav účtu', n('d:stav'), 'diff', 'stav') + tile('Jméno', n('d:jméno'), 'diff', 'jméno') +
+      tile('Duplicita ID', n('d:duplicita'), 'diff', 'duplicita') +
+      `<div class="stat" style="cursor:pointer" onclick="showTab('anomalies')"><span class="mute">Otevřené anomálie</span><b>${r.open_anomalies || 0}</b></div>`;
     $('#cmp-info').textContent = `Edookit ${r.ek_count} studentů · AD ${r.ad_count} účtů · párování přes edookitPersonID, jinak jednoznačná shoda jména · ` +
       `${new Date(r.ad_loaded).toLocaleTimeString('cs-CZ')}` + (r.warnings.length ? ` · ⚠ ${r.warnings.join('; ')}` : '') + ' · data se neukládají.';
     renderCompare();
@@ -1060,8 +1087,8 @@ function renderCompare() {
     cl = $('#cmp-class').value, yr = $('#cmp-year').value;
   const list = CMP.rows.filter(x =>
     (!st || (st === 'problems' ? ['diff', 'ek_only', 'ad_only'].includes(x.status) : x.status === st)) &&
-    (!df || x.diffs.includes(df)) && (!cl || x.ek?.class === cl) && (!yr || String(x.ek?.year) === yr) &&
-    (!q || [x._name, x.ad?.login, x.ad?.name, x.ek?.id, x.ad?.edookit_id, x.ek?.card, x.ad?.card_edookit, x.ad?.card_ad,
+    (!df || x.diffs.includes(df)) && (!cl || (x.ek?.classes || []).includes(cl)) && (!yr || (x.ek?.years || []).map(String).includes(yr)) &&
+    (!q || [x._name, x.ad?.login, x.ad?.name, ...(x.ek?.ids || []), x.ad?.edookit_id, ...(x.ek?.schedule_groups || []), ...(x.ek?.classes || []), x.ek?.card, x.ad?.card_edookit, x.ad?.card_ad,
       x.ek?.class, x.ek?.schedule_group, x.ad?.class].join(' ').toLowerCase().includes(q)));
   const bad = (x, f) => x.diffs.includes(f) ? ' class="bad"' : '';
   const dash = '<span class="mute">—</span>';
@@ -1070,9 +1097,9 @@ function renderCompare() {
     const e = x.ek, a = x.ad, [lbl, cls] = CMP_ST[x.status];
     return `<tr class="click" onclick="openCompare(${CMP.rows.indexOf(x)})">
       <td><span class="pill ${cls}">${lbl}</span>${x.diffs.length ? `<div class="mute" style="font-size:12px">${x.diffs.map(esc).join(', ')}</div>` : ''}</td>
-      <td${bad(x, 'jméno')}>${e ? `<b>${esc(e.last_name)} ${esc(e.first_name)}</b><div class="mute" style="font-size:12px">ID ${esc(e.id)}</div>` : dash}</td>
-      <td${bad(x, 'jméno') || bad(x, 'edookit id')}>${a ? `${esc(a.last_name || '')} ${esc(a.first_name || '')}<div class="mute" style="font-size:12px">${esc(a.login)}${a.edookit_id ? ' · ID ' + esc(a.edookit_id) : ' · bez Edookit ID'}</div>` : dash}</td>
-      <td${bad(x, 'skupina')}>${e?.schedule_group ? `<span class="pill role">${esc(e.schedule_group)}</span>` : dash}</td>
+      <td${bad(x, 'jméno') || bad(x, 'duplicita')}>${e ? `<b>${esc(e.last_name)} ${esc(e.first_name)}</b><div class="mute" style="font-size:12px">ID ${esc(e.ids.join(', '))}${e.ids.length > 1 ? (e.primary ? ' · primární ' + esc(e.primary) : ' · ⚠ nevyřešeno') : ''}</div>` : dash}</td>
+      <td${bad(x, 'jméno') || bad(x, 'edookit id') || bad(x, 'více účtů')}>${a ? `${esc(a.last_name || '')} ${esc(a.first_name || '')}<div class="mute" style="font-size:12px">${esc(a.login)}${a.edookit_id ? ' · ID ' + esc(a.edookit_id) : ' · bez Edookit ID'}${x.ad_other?.length ? ' · další účty: ' + esc(x.ad_other.join(', ')) : ''}</div>` : dash}</td>
+      <td${bad(x, 'skupina')}>${e?.schedule_groups?.length ? e.schedule_groups.map(g => `<span class="pill role">${esc(g)}</span>`).join(' ') : dash}</td>
       <td${bad(x, 'skupina')}>${a?.class ? esc(a.class) : dash}</td>
       <td${bad(x, 'karta')}>${e?.card ? esc(e.card) : dash}</td>
       <td${bad(x, 'karta')}>${a?.card_edookit ? `${esc(a.card_edookit)} <span class="mute" title="hodnota v AD (otherPager)">(AD ${esc(a.card_ad)})</span>` : dash}</td>
@@ -1085,8 +1112,9 @@ function openCompare(i) {
   const x = CMP.rows[i], e = x.ek || {}, a = x.ad || {};
   const rowsKv = [
     ['Jméno', `${e.first_name || ''} ${e.last_name || ''}`, `${a.first_name || ''} ${a.last_name || ''}`, 'jméno'],
-    ['Edookit ID', e.id, a.edookit_id, 'edookit id'],
-    ['Třída / skupina', [e.class, e.schedule_group].filter(Boolean).join(' → '), a.class, 'skupina'],
+    ['Edookit ID', (e.ids || []).join(', ') + (e.primary && (e.ids || []).length > 1 ? ` (primární ${e.primary})` : ''), a.edookit_id, 'edookit id'],
+    ['Třídy (studia)', (e.classes || []).join(', '), '', ''],
+    ['Skupiny pro AD', (e.schedule_groups || []).join(', '), a.class, 'skupina'],
     ['Karta (Edookit tvar)', e.card, a.card_edookit, 'karta'],
     ['Karta v AD (otherPager)', e.card ? null : '', a.card_ad, 'karta'],
     ['Stav', x.ek ? (e.active !== false ? 'aktivní' : 'neaktivní') : '', x.ad ? (!a.enabled ? 'zakázán' : a.excluded_ou ? 'vyřazen (OU)' : 'aktivní') : '', 'stav'],
@@ -1104,6 +1132,76 @@ function openCompare(i) {
 }
 function cmpOpenAd(i) { $('#sdlg').close(); openAdUser(CMP.rows[i].ad); }
 ['#cmp-q', '#cmp-status', '#cmp-diff', '#cmp-class', '#cmp-year'].forEach(s => $(s).addEventListener('input', renderCompare));
+
+// ---------- Anomálie
+let ANOM = null;
+const AN_ST = {open: ['otevřená', 'DEACTIVATED'], info: ['informace', 'role'], resolved: ['vyřešená', 'ACTIVE'],
+  dismissed: ['zamítnutá / vzato na vědomí', ''], auto_resolved: ['zmizela z dat', 'ACTIVE']};
+async function loadAnomalies() {
+  try {
+    const r = await api('GET', '/api/anomalies');
+    ANOM = r;
+    const cur = $('#an-type').value;
+    $('#an-type').innerHTML = '<option value="">Všechny typy</option>' + Object.entries(r.types).map(([k, v]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${esc(v)}</option>`).join('');
+    const nOpen = r.anomalies.filter(a => a.status === 'open').length;
+    $('#an-badge').textContent = nOpen; $('#an-badge').classList.toggle('hidden', !nOpen);
+    renderAnomalies();
+  } catch (e) { $('#an-list').innerHTML = `<div class="err">❌ ${esc(e.message)}</div>`; }
+}
+function renderAnomalies() {
+  if (!ANOM) return;
+  const st = $('#an-status').value, ty = $('#an-type').value, q = $('#an-q').value.toLowerCase();
+  const list = ANOM.anomalies.filter(a => (!st || (st === 'done' ? ['resolved', 'dismissed', 'auto_resolved'].includes(a.status) : a.status === st)) &&
+    (!ty || a.type === ty) && (!q || JSON.stringify([a.title, a.detail]).toLowerCase().includes(q)));
+  const dash = '<span class="mute">—</span>';
+  $('#an-list').innerHTML = list.map(a => {
+    const d = a.detail || {}, [sl, sc] = AN_ST[a.status] || [a.status, ''];
+    let body = '';
+    if (d.ids?.length) body += `<table class="mini"><thead><tr>${a.type === 'duplicate' && a.status === 'open' ? '<th>Primární</th>' : ''}<th>Edookit ID</th><th>Jméno</th><th>Třídy</th><th>Stav</th></tr></thead><tbody>` +
+      d.ids.map((x, i) => `<tr>${a.type === 'duplicate' && a.status === 'open' ? `<td><input type="radio" name="an-p-${a.id}" value="${esc(x.id)}" ${i === 0 ? 'checked' : ''}></td>` : ''}
+        <td>${esc(x.id)}${x.primary === String(x.id) && (x.person_ids || []).length > 1 ? ' <span class="pill ACTIVE">primární</span>' : ''}</td><td>${esc(x.name)}</td><td>${esc(x.classes) || dash}</td>
+        <td>${x.active === 0 ? '<span class="pill DEACTIVATED">neaktivní</span>' : '<span class="pill ACTIVE">aktivní</span>'}</td></tr>`).join('') + '</tbody></table>';
+    if (d.ad?.length) body += `<table class="mini"><thead><tr><th>Login</th><th>Jméno</th><th>Třída</th><th>Edookit ID</th><th>Umístění</th></tr></thead><tbody>` +
+      d.ad.map(x => `<tr><td>${esc(x.login)}</td><td>${esc(x.name)}</td><td>${esc(x.class) || dash}</td><td>${esc(x.edookit_id) || dash}</td><td class="mute" style="font-size:12px">${esc(x.dn)}</td></tr>`).join('') + '</tbody></table>';
+    if (d.studies?.length) body += `<div class="hint">Studia: ${d.studies.map(x => `${esc(x.class)} (${x.year ?? '?'}. roč., do AD ${esc(x.schedule_group)})`).join(' · ')}. Do AD patří skupiny všech studií; hlavní studium (UniFi role, OU) = vyšší ročník, pokud nezvolíte jinak.</div>`;
+    if (d.certainty) body += `<div class="hint">${d.certainty === 'rc' ? '✅ Shoda rodného čísla – jde jistě o stejnou osobu.' : '⚠ Shoda jen podle jména – ověřte, zda nejde o jmenovce.'}</div>`;
+    let act = '';
+    if (a.status === 'open' && a.type === 'duplicate')
+      act = `<input id="an-n-${a.id}" placeholder="Poznámka (volitelně)" style="flex:1">
+        <button class="btn primary sm" onclick="anAct(${a.id}, 'merge')">Sloučit – vybrané ID je primární</button>
+        <button class="btn sm" onclick="anAct(${a.id}, 'not_same')">Nejde o stejnou osobu</button>`;
+    else if (a.type === 'multi_study' && ['open', 'info'].includes(a.status))
+      act = `<label class="mute">Hlavní studium:</label><select id="an-m-${a.id}"><option value="">automaticky (vyšší ročník)</option>${(d.studies || []).map(x => `<option>${esc(x.class)}</option>`).join('')}</select>
+        <button class="btn sm" onclick="anAct(${a.id}, 'main_class')">Uložit</button>`;
+    else if (a.status === 'open')
+      act = `<input id="an-n-${a.id}" placeholder="Poznámka (volitelně)" style="flex:1"><button class="btn sm" onclick="anAct(${a.id}, 'ack')">Vzít na vědomí</button>`;
+    if (['resolved', 'dismissed'].includes(a.status)) {
+      act = `<button class="btn sm" onclick="anAct(${a.id}, 'reopen')">Znovu otevřít</button>`;
+      if (a.type === 'duplicate' && a.status === 'resolved')
+        act += (d.ids || []).filter(x => x.primary && x.primary !== String(x.id)).map(x => `<button class="btn sm danger" onclick="anSplit('${esc(x.id)}')">Oddělit ID ${esc(x.id)}</button>`).join('');
+    }
+    return `<div class="card" style="margin-bottom:10px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="pill ${sc}">${sl}</span><span class="pill">${esc(ANOM.types[a.type] || a.type)}</span><b>${esc(a.title)}</b>
+        <span class="mute" style="margin-left:auto;font-size:12px">zjištěno ${new Date(a.created).toLocaleString('cs-CZ')}</span></div>
+      ${body}
+      ${a.resolution ? `<div class="hint">✔ ${esc(a.resolution)} · ${esc(a.resolved_by || '')} ${a.resolved_at ? new Date(a.resolved_at).toLocaleString('cs-CZ') : ''}</div>` : ''}
+      ${act ? `<div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">${act}</div>` : ''}</div>`;
+  }).join('') || '<div class="mute">Žádné anomálie v tomto filtru. Anomálie vzniknou po načtení studentů z Edookitu (a porovnání s AD).</div>';
+}
+async function anAct(id, action) {
+  const body = {action, note: $(`#an-n-${id}`)?.value || ''};
+  if (action === 'merge') {
+    body.primary_id = document.querySelector(`input[name="an-p-${id}"]:checked`)?.value;
+    if (!confirm(`Sloučit ID do jedné osoby s primárním ID ${body.primary_id}? Primární ID se bude používat pro AD (edookitPersonID).`)) return;
+  }
+  if (action === 'main_class') body.main_class = $(`#an-m-${id}`).value || null;
+  await run(async () => { await api('POST', `/api/anomalies/${id}`, body); CMP = null; await loadAnomalies(); }, 'Uloženo');
+}
+async function anSplit(eid) {
+  if (!confirm(`Oddělit Edookit ID ${eid} od osoby? Anomálie se znovu otevře.`)) return;
+  await run(async () => { await api('POST', '/api/persons/split', {ek_id: eid}); CMP = null; await loadAnomalies(); }, 'Odděleno');
+}
+['#an-q', '#an-status', '#an-type'].forEach(s => $(s).addEventListener('input', renderAnomalies));
 
 // ---------- Active Directory
 const AD = {students: null, employees: null};

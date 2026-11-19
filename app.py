@@ -1254,6 +1254,283 @@ async def ek_fetch_list(path: str, auth: str) -> list:
     return lst
 
 
+# ---------------------------------------------------------------- interní databáze: osoby a anomálie
+# Osoba = jeden člověk; může mít víc Edookit ID (chyba studijního) – sloučení rozhoduje uživatel.
+# Rodné číslo se neukládá, jen jeho otisk (HMAC s klíčem odvozeným z master.key).
+import sqlite3
+
+DB_FILE = DATA / "syncpro.db"
+_db_lock = threading.Lock()
+_RC_KEY = hashlib.sha256(b"syncpro-rc:" + _key(KEYS / "master.key", Fernet.generate_key)).digest()
+
+
+def _norm(v) -> str:
+    return " ".join(str(v or "").split()).casefold()
+
+
+def rc_fingerprint(rc) -> str | None:
+    v = re.sub(r"[^0-9]", "", str(rc or ""))
+    return hmac.new(_RC_KEY, v.encode(), hashlib.sha256).hexdigest() if len(v) >= 9 else None
+
+
+def db():
+    con = sqlite3.connect(DB_FILE, timeout=10)
+    con.row_factory = sqlite3.Row
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS person (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, primary_ek_id TEXT, main_class TEXT, note TEXT,
+        created TEXT, updated TEXT);
+    CREATE TABLE IF NOT EXISTS person_ek (
+        ek_id TEXT PRIMARY KEY, person_id INTEGER NOT NULL REFERENCES person(id),
+        first_name TEXT, last_name TEXT, classes TEXT, rc_hash TEXT, active INTEGER,
+        first_seen TEXT, last_seen TEXT);
+    CREATE TABLE IF NOT EXISTS anomaly (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE NOT NULL, type TEXT NOT NULL, scope TEXT NOT NULL,
+        status TEXT NOT NULL, title TEXT, detail TEXT, created TEXT, updated TEXT, last_seen TEXT,
+        resolved_by TEXT, resolved_at TEXT, resolution TEXT);
+    CREATE INDEX IF NOT EXISTS ix_person_ek_person ON person_ek(person_id);
+    """)
+    return con
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def persons_map() -> dict:
+    """ek_id -> {person_id, ids, primary, main_class}"""
+    with _db_lock, db() as con:
+        rows = con.execute("SELECT e.ek_id, e.person_id, p.primary_ek_id, p.main_class FROM person_ek e "
+                           "JOIN person p ON p.id = e.person_id").fetchall()
+    ids = {}
+    for r in rows:
+        ids.setdefault(r["person_id"], []).append(r["ek_id"])
+    return {r["ek_id"]: {"person_id": r["person_id"], "ids": sorted(ids[r["person_id"]], key=lambda x: (len(x), x)),
+                         "primary": r["primary_ek_id"], "main_class": r["main_class"]} for r in rows}
+
+
+def anomaly_upsert(con, key, typ, scope, title, detail, seen: set):
+    seen.add(key)
+    now = _now()
+    cur = con.execute("SELECT id, status FROM anomaly WHERE key = ?", (key,)).fetchone()
+    js = json.dumps(detail, ensure_ascii=False, default=str)
+    if cur:
+        st = cur["status"]
+        if st == "auto_resolved":   # problém se vrátil
+            st = "open"
+        con.execute("UPDATE anomaly SET title=?, detail=?, last_seen=?, updated=?, status=? WHERE id=?",
+                    (title, js, now, now, st, cur["id"]))
+    else:
+        st = "info" if typ == "multi_study" else "open"
+        con.execute("INSERT INTO anomaly(key, type, scope, status, title, detail, created, updated, last_seen) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)", (key, typ, scope, st, title, js, now, now, now))
+
+
+def anomaly_close_missing(con, scope, seen: set):
+    now = _now()
+    for r in con.execute("SELECT id, key FROM anomaly WHERE scope=? AND status IN ('open','info')", (scope,)).fetchall():
+        if r["key"] not in seen:
+            con.execute("UPDATE anomaly SET status='auto_resolved', resolution='Problém už v datech není', "
+                        "resolved_at=?, resolved_by='systém', updated=? WHERE id=?", (now, now, r["id"]))
+
+
+def persons_sync(rows: list[dict], rc_hash: dict):
+    """Zapíše Edookit ID do databáze (nové ID = nová osoba) a vyhodnotí anomálie Edookitu."""
+    now = _now()
+    with _db_lock, db() as con:
+        for r in rows:
+            eid = str(r["id"])
+            cls = json.dumps([x["class"] for x in r.get("studies") or []], ensure_ascii=False)
+            act = None if r.get("active") is None else int(r.get("active") is not False)
+            if con.execute("SELECT 1 FROM person_ek WHERE ek_id=?", (eid,)).fetchone():
+                con.execute("UPDATE person_ek SET first_name=?, last_name=?, classes=?, rc_hash=COALESCE(?, rc_hash), "
+                            "active=?, last_seen=? WHERE ek_id=?",
+                            (r.get("first_name"), r.get("last_name"), cls, rc_hash.get(eid), act, now, eid))
+            else:
+                pid = con.execute("INSERT INTO person(created, updated) VALUES (?,?)", (now, now)).lastrowid
+                con.execute("INSERT INTO person_ek(ek_id, person_id, first_name, last_name, classes, rc_hash, active, "
+                            "first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?)",
+                            (eid, pid, r.get("first_name"), r.get("last_name"), cls, rc_hash.get(eid), act, now, now))
+        cur_ids = {str(r["id"]) for r in rows}
+        recs = {x["ek_id"]: dict(x) for x in con.execute("SELECT * FROM person_ek").fetchall() if x["ek_id"] in cur_ids}
+        seen: set = set()
+
+        def label(eid):
+            x = recs[eid]
+            cl = ", ".join(json.loads(x["classes"] or "[]"))
+            return {"id": eid, "name": f"{x['last_name'] or ''} {x['first_name'] or ''}".strip(), "classes": cl,
+                    "active": x["active"], "person_id": x["person_id"]}
+
+        # 1) stejná osoba pod více ID – jistě podle otisku RČ
+        by_rc = {}
+        for eid, x in recs.items():
+            if x["rc_hash"]:
+                by_rc.setdefault(x["rc_hash"], []).append(eid)
+        sure = set()
+        for ids in by_rc.values():
+            if len({recs[i]["person_id"] for i in ids}) > 1:
+                ids = sorted(ids, key=lambda v: (len(v), v))
+                sure.add(tuple(ids))
+                anomaly_upsert(con, "dup:" + ",".join(ids), "duplicate", "edookit",
+                               f"{label(ids[0])['name']} – stejná osoba pod {len(ids)} ID (shoda rodného čísla)",
+                               {"ids": [label(i) for i in ids], "certainty": "rc"}, seen)
+        # 2) podezření podle jména (různé RČ = různí lidé)
+        by_name = {}
+        for eid, x in recs.items():
+            by_name.setdefault((_norm(x["first_name"]), _norm(x["last_name"])), []).append(eid)
+        for (fn, ln), ids in by_name.items():
+            if not fn or not ln or len({recs[i]["person_id"] for i in ids}) < 2:
+                continue
+            ids = sorted(ids, key=lambda v: (len(v), v))
+            if tuple(ids) in sure:
+                continue
+            rcs = {recs[i]["rc_hash"] for i in ids if recs[i]["rc_hash"]}
+            if len(rcs) > 1 and len(rcs) == len(ids):
+                continue   # všichni mají rozdílné RČ → jmenovci
+            anomaly_upsert(con, "dup:" + ",".join(ids), "duplicate", "edookit",
+                           f"{label(ids[0])['name']} – možná stejná osoba pod {len(ids)} ID (shoda jména)",
+                           {"ids": [label(i) for i in ids], "certainty": "name"}, seen)
+        # 3) více studií pod jedním ID (informace)
+        for r in rows:
+            st = r.get("studies") or []
+            if len(st) > 1:
+                eid = str(r["id"])
+                anomaly_upsert(con, "multi:" + eid, "multi_study", "edookit",
+                               f"{label(eid)['name']} – {len(st)} studia ({', '.join(x['class'] for x in st)})",
+                               {"ids": [label(eid)], "studies": st}, seen)
+        # 4) stejná karta u různých osob
+        by_card = {}
+        for r in rows:
+            if r.get("card") and r.get("active") is not False:
+                by_card.setdefault(str(r["card"]).upper(), []).append(str(r["id"]))
+        for card, ids in by_card.items():
+            rcs = {recs[i]["rc_hash"] for i in ids if i in recs}
+            if len({recs[i]["person_id"] for i in ids if i in recs}) > 1 and not (len(rcs) == 1 and None not in rcs):
+                ids = sorted(ids, key=lambda v: (len(v), v))
+                anomaly_upsert(con, f"card:{card}", "card_shared", "edookit",
+                               f"Karta {card} je u {len(ids)} studentů", {"ids": [label(i) for i in ids], "card": card}, seen)
+        anomaly_close_missing(con, "edookit", seen)
+
+
+def ad_anomalies_sync(ad_rows: list[dict], pmap: dict):
+    """Anomálie AD: víc aktivních účtů pro jednu osobu, aktivní účet bez edookitPersonID."""
+    with _db_lock, db() as con:
+        seen: set = set()
+        by_person = {}
+        for a in ad_rows:
+            if not a["enabled"] or a.get("excluded_ou"):
+                continue
+            eid = str(a.get("edookit_id") or "").strip()
+            if not eid:
+                anomaly_upsert(con, "adnoid:" + a["dn"].lower(), "ad_missing_id", "ad",
+                               f"{a.get('name') or a.get('login')} – účet v AD nemá edookitPersonID",
+                               {"ad": [{k: a.get(k) for k in ("dn", "login", "name", "class")}]}, seen)
+                continue
+            key = (pmap.get(eid) or {}).get("person_id") or ("ek:" + eid)
+            by_person.setdefault(key, []).append(a)
+        for key, accs in by_person.items():
+            if len(accs) > 1:
+                dns = sorted(x["dn"].lower() for x in accs)
+                anomaly_upsert(con, "addup:" + "|".join(dns), "ad_duplicate", "ad",
+                               f"{accs[0].get('name')} – {len(accs)} aktivní účty v AD pro jednu osobu",
+                               {"ad": [{k: x.get(k) for k in ("dn", "login", "name", "class", "edookit_id")} for x in accs]},
+                               seen)
+        anomaly_close_missing(con, "ad", seen)
+
+
+ANOMALY_TYPES = {"duplicate": "Více Edookit ID", "multi_study": "Více studií", "card_shared": "Sdílená karta",
+                 "ad_missing_id": "AD bez Edookit ID", "ad_duplicate": "Více účtů v AD"}
+
+
+@app.get("/api/anomalies")
+async def anomalies_list(_: str = Depends(admin)):
+    with _db_lock, db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM anomaly ORDER BY CASE status WHEN 'open' THEN 0 "
+                                             "WHEN 'info' THEN 1 ELSE 2 END, updated DESC").fetchall()]
+    pm = persons_map()
+    for r in rows:
+        r["detail"] = json.loads(r["detail"] or "{}")
+        for x in r["detail"].get("ids", []):
+            p = pm.get(str(x["id"])) or {}
+            x["person_ids"], x["primary"] = p.get("ids"), p.get("primary")
+    return {"anomalies": rows, "types": ANOMALY_TYPES}
+
+
+class AnomalyAction(BaseModel):
+    action: str                     # merge | not_same | ack | reopen | main_class
+    primary_id: str | None = None
+    main_class: str | None = None
+    note: str = ""
+
+
+@app.post("/api/anomalies/{aid}")
+async def anomaly_resolve(aid: int, a: AnomalyAction, who: str = Depends(admin)):
+    now = _now()
+    with _db_lock, db() as con:
+        an = con.execute("SELECT * FROM anomaly WHERE id=?", (aid,)).fetchone()
+        if not an:
+            raise HTTPException(404, "Anomálie nenalezena")
+        det = json.loads(an["detail"] or "{}")
+        ids = [str(x["id"]) for x in det.get("ids", [])]
+        if a.action == "merge":
+            if an["type"] != "duplicate":
+                raise HTTPException(400, "Sloučit lze jen duplicitní ID")
+            if a.primary_id not in ids:
+                raise HTTPException(400, "Vyberte primární Edookit ID")
+            target = con.execute("SELECT person_id FROM person_ek WHERE ek_id=?", (a.primary_id,)).fetchone()["person_id"]
+            olds = {r["person_id"] for r in con.execute(
+                f"SELECT person_id FROM person_ek WHERE ek_id IN ({','.join('?' * len(ids))})", ids).fetchall()}
+            for old in olds - {target}:
+                con.execute("UPDATE person_ek SET person_id=? WHERE person_id=?", (target, old))
+                con.execute("DELETE FROM person WHERE id=?", (old,))
+            con.execute("UPDATE person SET primary_ek_id=?, note=?, updated=? WHERE id=?",
+                        (a.primary_id, a.note or None, now, target))
+            res = f"Sloučeno, primární ID {a.primary_id}"
+            st = "resolved"
+        elif a.action == "not_same":
+            res, st = "Nejde o stejnou osobu", "dismissed"
+        elif a.action == "ack":
+            res, st = "Vzato na vědomí", "dismissed"
+        elif a.action == "main_class":
+            if not ids:
+                raise HTTPException(400, "Anomálie nemá studenta")
+            pid = con.execute("SELECT person_id FROM person_ek WHERE ek_id=?", (ids[0],)).fetchone()["person_id"]
+            con.execute("UPDATE person SET main_class=?, updated=? WHERE id=?", (a.main_class or None, now, pid))
+            res, st = (f"Hlavní studium: {a.main_class}" if a.main_class else "Hlavní studium: vyšší ročník"), an["status"]
+        elif a.action == "reopen":
+            res, st = None, "info" if an["type"] == "multi_study" else "open"
+        else:
+            raise HTTPException(400, "Neznámá akce")
+        con.execute("UPDATE anomaly SET status=?, resolution=?, resolved_by=?, resolved_at=?, updated=? WHERE id=?",
+                    (st, (res + (f" – {a.note}" if a.note else "")) if res else None,
+                     who if res else None, now if res else None, now, aid))
+    audit(who, "anomaly." + a.action, {"anomaly": an["title"], "ids": ids, "primary": a.primary_id,
+                                       "main_class": a.main_class, "note": a.note})
+    return {"ok": True}
+
+
+@app.post("/api/persons/split")
+async def person_split(body: dict, who: str = Depends(admin)):
+    """Zruší sloučení: dané Edookit ID dostane vlastní osobu."""
+    eid = str(body.get("ek_id") or "")
+    now = _now()
+    with _db_lock, db() as con:
+        r = con.execute("SELECT person_id FROM person_ek WHERE ek_id=?", (eid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "ID nenalezeno")
+        if con.execute("SELECT COUNT(*) c FROM person_ek WHERE person_id=?", (r["person_id"],)).fetchone()["c"] < 2:
+            raise HTTPException(400, "ID není sloučené s jiným")
+        pid = con.execute("INSERT INTO person(created, updated) VALUES (?,?)", (now, now)).lastrowid
+        con.execute("UPDATE person_ek SET person_id=? WHERE ek_id=?", (pid, eid))
+        con.execute("UPDATE person SET primary_ek_id=NULL WHERE id=? AND primary_ek_id=?", (r["person_id"], eid))
+        for an in con.execute("SELECT id, key FROM anomaly WHERE type='duplicate'").fetchall():
+            if eid in an["key"].split(":", 1)[1].split(","):
+                con.execute("UPDATE anomaly SET status='open', resolution=NULL, resolved_by=NULL, resolved_at=NULL "
+                            "WHERE id=?", (an["id"],))
+    audit(who, "person.split", {"ek_id": eid})
+    return {"ok": True}
+
+
 _S_GROUP = re.compile(r"^(?P<cls>.+?)\s*S(?P<n>\d+)$")
 
 
@@ -1343,23 +1620,64 @@ async def ek_load(force: bool = False) -> dict:
     pmap = {}
     rows = []
 
-    def make(pid, p, z):
+    class_by_zk = {ad_group_name(t.get("Zkratka")): t for t in tridy or [] if t.get("Zkratka")}
+    rc_hash = {}
+
+    def class_of_group(gname: str):
+        """Třída, ke které skupina patří (1.E S1 → 1.E, 1.AK J1 → 1.AK) – nejdelší shodná zkratka třídy."""
+        best = None
+        for t in tridy or []:
+            zk = str(t.get("Zkratka") or "")
+            if zk and (gname == zk or gname.startswith(zk + " ") or
+                       ((m := _S_GROUP.match(gname)) and ad_group_name(m["cls"]) == ad_group_name(zk))):
+                if not best or len(zk) > len(best):
+                    best = zk
+        return best
+
+    def studies_of(class_names: list, groups: list) -> list[dict]:
+        """Studia = vlastní třída(y) + třídy, do jejichž S skupiny student patří (2 obory → 2 studia)."""
+        names = [c for c in class_names if c]
+        for g in groups:
+            m = _S_GROUP.match(g)
+            c = class_of_group(g) if m else None
+            if c:
+                names.append(c)
+        out, seen = [], set()
+        for c in names:
+            key = ad_group_name(c)
+            if key in seen:
+                continue
+            seen.add(key)
+            mine = [g for g in groups if (m := _S_GROUP.match(g)) and ad_group_name(m["cls"]) == key]
+            sched, src = schedule_group(c, mine)
+            t = class_by_zk.get(key) or {}
+            roc = t.get("Rocnik")
+            if roc in (None, "") and str(c)[:1].isdigit():
+                roc = int(str(c)[0])
+            out.append({"class": c, "year": roc, "schedule_group": sched, "schedule_group_src": src,
+                        "schedule_no": (_S_GROUP.match(src)["n"] if src and _S_GROUP.match(src) else None)})
+        out.sort(key=lambda x: (-(x["year"] or 0), str(x["class"])))   # hlavní studium = vyšší ročník
+        return out
+
+    def make(pid, plist, z):
+        p = plist[0] if plist else None
         t = tmap.get((z or {}).get("PkTrida"))
         gids = by_zak.get(str(pid), []) or by_zak.get(str((z or {}).get("PkZak")), [])
         groups = sorted({str(gmap[g].get("Zkratka")) for g in gids if gmap[g].get("Zkratka")})
-        klass = (p or {}).get("ClassName") or (t or {}).get("Zkratka")
-        roc = (t or {}).get("Rocnik")
-        if roc in (None, ""):
-            first = next((x for x in [*groups, klass] if x and str(x)[0].isdigit()), None)
-            roc = int(str(first)[0]) if first else None
-        sched, sched_src = schedule_group(klass, groups)
+        studies = studies_of([x.get("ClassName") for x in plist or []] + [(t or {}).get("Zkratka")], groups)
+        main = studies[0] if studies else {}
+        rc = next((x.get("PersonalNumber") for x in plist or [] if x.get("PersonalNumber")), None)
+        if rc:
+            rc_hash[str(pid)] = rc_fingerprint(rc)
         return {
-            "groups": groups, "year": roc, "schedule_group": sched, "schedule_group_src": sched_src,
-            "schedule_no": (_S_GROUP.match(sched_src)["n"] if sched_src and _S_GROUP.match(sched_src) else None),
+            "groups": groups, "studies": studies, "year": main.get("year"),
+            "schedule_group": main.get("schedule_group"), "schedule_group_src": main.get("schedule_group_src"),
+            "schedule_no": main.get("schedule_no"),
+            "schedule_groups": [x["schedule_group"] for x in studies if x["schedule_group"]],
             "id": pid,
             "first_name": (p or {}).get("Firstname") or (z or {}).get("Jmeno"),
             "last_name": (p or {}).get("Lastname") or (z or {}).get("Prijmeni"),
-            "class": klass,
+            "class": main.get("class"),
             "email": (z or {}).get("Email") or (p or {}).get("Email"),
             "card": (z or {}).get("Karta"),
             "card_number": (z or {}).get("KartaCislo"),
@@ -1368,14 +1686,22 @@ async def ek_load(force: bool = False) -> dict:
         }
 
     if personal is not None:
-        for p in personal:
-            pid = p.get("PersonId")
-            pmap[pid] = p
-            rows.append(make(pid, p, zmap.get(pid)))
+        plists = {}
+        for p in personal:          # student se 2 obory může mít víc řádků se stejným PersonId
+            plists.setdefault(p.get("PersonId"), []).append(p)
+        for pid, plist in plists.items():
+            pmap[pid] = plist[0] if len(plist) == 1 else {**plist[0], "ClassName": ", ".join(
+                str(x.get("ClassName")) for x in plist if x.get("ClassName"))}
+            rows.append(make(pid, plist, zmap.get(pid)))
     else:
         for z in zaci:
             rows.append(make(z.get("PkZak"), None, z))
-    data = {"rows": rows, "personal": pmap, "zaci": zmap, "tridy": tmap, "skupiny": gmap, "by_zak": by_zak,
+    try:
+        persons_sync(rows, rc_hash)
+    except Exception as e:  # noqa: BLE001 – databáze nesmí shodit načtení
+        warnings.append(f"databáze osob: {type(e).__name__}: {e}")
+        traceback.print_exc()
+    data = {"rows": rows, "rc_hash": rc_hash, "personal": pmap, "zaci": zmap, "tridy": tmap, "skupiny": gmap, "by_zak": by_zak,
             "warnings": warnings,
             "sources": [k for k in ("personal", "zaci", "tridy", "skupiny") if res.get(k) is not None],
             "loaded": datetime.now(timezone.utc).isoformat(timespec="seconds")}
@@ -1392,9 +1718,11 @@ async def ek_students(refresh: bool = False, _: str = Depends(admin)):
     sample = next(iter(gs.values()), None)
     gstat = {"groups": len(gs), "students_in_groups": sum(1 for r in d["rows"] if r.get("groups")),
              "fields": list(sample)[:12] if sample else []}
+    pm = persons_map()
+    rows = [{**r, "person": pm.get(str(r["id"]))} for r in d["rows"]]
     return {"count": len(d["rows"]), "sources": d["sources"], "warnings": d["warnings"], "loaded": d["loaded"],
             "group_stats": gstat,
-            "students": d["rows"]}
+            "students": rows}
 
 
 @app.get("/api/edookit/students/{sid}")
@@ -1767,10 +2095,6 @@ async def ad_load(kind: str = "students", refresh: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------- porovnání Edookit ↔ AD (studenti)
-def _norm(v) -> str:
-    return " ".join(str(v or "").split()).casefold()
-
-
 def _name_parts(v) -> list[str]:
     return [x for x in re.split(r"[\s\-–]+", _norm(v)) if x]
 
@@ -1788,11 +2112,23 @@ def _card(v) -> str:
 
 @app.get("/api/compare/ek-ad")
 async def compare_ek_ad(refresh: bool = False, _: str = Depends(admin)):
-    """Edookit je zdroj pravdy. Párování: edookitPersonID v AD = PersonId/PkZak v Edookitu,
-    náhradně jednoznačná shoda e-mailu nebo jména."""
+    """Edookit je zdroj pravdy. Porovnává se po OSOBÁCH (osoba může mít víc Edookit ID a víc studií).
+    Párování: edookitPersonID v AD ∈ ID osoby, náhradně jednoznačná shoda jména."""
     ek, ad = await asyncio.gather(ek_load(force=refresh), ad_load("students", refresh))
-    ek_rows = ek["rows"]
+    pm = persons_map()
     ad_rows = ad["users"]
+    try:
+        ad_anomalies_sync(ad_rows, pm)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    with _db_lock, db() as con:
+        dup_open = {i for r in con.execute("SELECT key FROM anomaly WHERE type='duplicate' AND status='open'").fetchall()
+                    for i in r["key"].split(":", 1)[1].split(",")}
+    # osoby z Edookitu
+    persons = {}
+    for r in ek["rows"]:
+        info = pm.get(str(r["id"])) or {"person_id": "ek:" + str(r["id"]), "ids": [str(r["id"])], "primary": None}
+        persons.setdefault(info["person_id"], {"info": info, "rows": []})["rows"].append(r)
     by_id = {}
     for a in ad_rows:
         if a.get("edookit_id"):
@@ -1802,68 +2138,98 @@ async def compare_ek_ad(refresh: bool = False, _: str = Depends(admin)):
         fp, lp = _name_parts(a.get("first_name")), _name_parts(a.get("last_name"))
         by_name.setdefault((fp[0] if fp else "", lp[0] if lp else ""), []).append(a)
     used, out = set(), []
-
-    def pick(cands):
-        cands = [c for c in cands if c["dn"] not in used]
-        if not cands:
-            return None
-        if len(cands) > 1:  # víc účtů – preferuj aktivní mimo vyřazené OU
-            act = [c for c in cands if c["enabled"] and not c.get("excluded_ou")]
-            cands = act or cands
-        return cands[0]
-
-    for e in ek_rows:
-        how, a = "id", pick(by_id.get(str(e["id"]), []))
-        if not a:
-            fp, lp = _name_parts(e.get("first_name")), _name_parts(e.get("last_name"))
+    for pid, P in persons.items():
+        info, rws = P["info"], P["rows"]
+        ids = [str(r["id"]) for r in rws]
+        primary = info.get("primary") or (ids[0] if len(ids) == 1 else None)
+        main_row = next((r for r in rws if str(r["id"]) == primary), None) or \
+            sorted(rws, key=lambda r: (r.get("active") is False, -(r.get("year") or 0)))[0]
+        studies, seen_cls = [], set()
+        for r in rws:
+            for st in r.get("studies") or []:
+                if r.get("active") is not False and st["class"] not in seen_cls:
+                    seen_cls.add(st["class"])
+                    studies.append({**st, "ek_id": str(r["id"])})
+        studies.sort(key=lambda x: (-(x["year"] or 0), str(x["class"])))
+        if info.get("main_class"):
+            studies.sort(key=lambda x: x["class"] != info["main_class"])
+        accs = [a for i in ids for a in by_id.get(i, []) if a["dn"] not in used]
+        how = "id" if accs else None
+        if not accs:
+            fp, lp = _name_parts(main_row.get("first_name")), _name_parts(main_row.get("last_name"))
             cands = [c for c in by_name.get((fp[0] if fp else "", lp[0] if lp else ""), [])
-                     if not c.get("edookit_id") and name_match(e.get("first_name"), c.get("first_name"))
-                     and name_match(e.get("last_name"), c.get("last_name"))]
+                     if c["dn"] not in used and not c.get("edookit_id")
+                     and name_match(main_row.get("first_name"), c.get("first_name"))
+                     and name_match(main_row.get("last_name"), c.get("last_name"))]
             if len(cands) == 1:
-                how, a = "jméno", pick(cands)
-        if a:
-            used.add(a["dn"])
-        out.append((e, a, how if a else None))
+                accs, how = cands, "jméno"
+        act_accs = [x for x in accs if x["enabled"] and not x.get("excluded_ou")]
+        a = (act_accs or accs or [None])[0]
+        for x in accs:
+            used.add(x["dn"])
+        out.append(dict(kind="person", ids=ids, primary=primary, row=main_row, studies=studies,
+                        active=any(r.get("active") is not False for r in rws),
+                        cards={str(r["card"]).upper() for r in rws if r.get("card")}, ad=a, accs=accs, how=how))
     for a in ad_rows:
         if a["dn"] not in used:
-            out.append((None, a, None))
+            out.append(dict(kind="ad", ad=a))
 
     rows = []
-    for e, a, how in out:
-        ek_active = bool(e) and e.get("active") is not False
+    for x in out:
+        a = x.get("ad")
         ad_active = bool(a) and a["enabled"] and not a.get("excluded_ou")
-        diffs = []
-        if e and a:
+        diffs, e = [], x.get("row")
+        if x["kind"] == "person":
+            if (len(x["ids"]) > 1 and not x["primary"]) or dup_open & set(x["ids"]):
+                diffs.append("duplicita")
+            exp = [st["schedule_group"] for st in x["studies"] if st["schedule_group"]]
+            ad_cls = [c.strip() for c in ((a or {}).get("class") or "").split(",") if c.strip()]
+        if x["kind"] == "person" and a:
             if not (name_match(e.get("first_name"), a.get("first_name")) and name_match(e.get("last_name"), a.get("last_name"))):
                 diffs.append("jméno")
-            ad_cls = [x.strip() for x in (a.get("class") or "").split(",") if x.strip()]
-            if ek_active and e.get("schedule_group") and e["schedule_group"].casefold() not in [x.casefold() for x in ad_cls]:
+            if x["active"] and {g.casefold() for g in exp} != {g.casefold() for g in ad_cls}:
                 diffs.append("skupina")
-            if _card(e.get("card")) != _card(a.get("card_edookit")):
+            if (x["cards"] or a.get("card_edookit")) and _card(a.get("card_edookit")) not in x["cards"]:
                 diffs.append("karta")
-            if ek_active != ad_active:
+            if x["active"] != ad_active:
                 diffs.append("stav")
-            if how != "id":
+            want = x["primary"]
+            if x["how"] != "id" or (want and str(a.get("edookit_id") or "").strip() != want):
                 diffs.append("edookit id")
+            if len([y for y in x["accs"] if y["enabled"] and not y.get("excluded_ou")]) > 1:
+                diffs.append("více účtů")
             status = "diff" if diffs else "ok"
-        elif e:
-            status = "ek_only" if ek_active else "ek_only_inactive"
+        elif x["kind"] == "person" and "duplicita" in diffs:
+            status = "diff"
+        elif x["kind"] == "person":
+            status = "ek_only" if x["active"] else "ek_only_inactive"
         else:
             status = "ad_only" if ad_active else "ad_only_inactive"
+        ekd = None
+        if x["kind"] == "person":
+            ekd = {"id": x["primary"] or x["ids"][0], "ids": x["ids"], "primary": x["primary"],
+                   "first_name": e.get("first_name"), "last_name": e.get("last_name"),
+                   "class": (x["studies"][0]["class"] if x["studies"] else e.get("class")),
+                   "classes": [st["class"] for st in x["studies"]], "years": [st["year"] for st in x["studies"]],
+                   "year": (x["studies"][0]["year"] if x["studies"] else e.get("year")),
+                   "schedule_group": exp[0] if exp else None, "schedule_groups": exp,
+                   "card": e.get("card") if len(x["cards"]) <= 1 else ", ".join(sorted(x["cards"])),
+                   "active": x["active"]}
         rows.append({
-            "status": status, "diffs": diffs, "match": how,
-            "ek": e and {k: e.get(k) for k in ("id", "first_name", "last_name", "class", "schedule_group",
-                                               "schedule_no", "card", "active", "year")},
+            "status": status, "diffs": diffs, "match": x.get("how"), "ek": ekd,
             "ad": a and {k: a.get(k) for k in ("dn", "login", "first_name", "last_name", "name", "class", "card_ad",
                                                "card_edookit", "edookit_id", "enabled", "excluded_ou", "email")},
+            "ad_other": [y["login"] for y in x.get("accs", []) if a and y["dn"] != a["dn"]],
         })
     counts = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
         for d in r["diffs"]:
             counts["d:" + d] = counts.get("d:" + d, 0) + 1
+    with _db_lock, db() as con:
+        open_an = con.execute("SELECT COUNT(*) c FROM anomaly WHERE status='open'").fetchone()["c"]
     return {"rows": rows, "counts": counts, "ek_loaded": ek["loaded"], "ad_loaded": ad["loaded"],
-            "ek_count": len(ek_rows), "ad_count": len(ad_rows), "warnings": ek["warnings"]}
+            "ek_count": len(ek["rows"]), "ad_count": len(ad_rows), "warnings": ek["warnings"], "open_anomalies": open_an}
 
 
 @app.get("/api/ad/user")
