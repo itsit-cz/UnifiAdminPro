@@ -17,7 +17,7 @@ import time
 import traceback
 import urllib.request
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -85,7 +85,7 @@ if not load_cfg():
 
 
 def audit(who: str, action: str, detail: dict):
-    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "who": who, "action": action, **detail}
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "who": who, "action": action, **detail}
     with AUDIT_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -474,7 +474,7 @@ async def setup_complete(s: SetupIn, request: Request):
     save_cfg({"site_name": s.site_name.strip(), "admin": {"user": s.admin_user.strip(),
               "pw": hash_pw(s.admin_password)}, "ua_host": host, "ua_token": enc(token),
               "wg_conf": enc(wg), "cert_sha256": s.cert_sha256 or None,
-              "installed": datetime.now().isoformat(timespec="seconds")})
+              "installed": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     SETUP_CODE = None
     await apply_saved()
     request.session["user"] = s.admin_user.strip()
