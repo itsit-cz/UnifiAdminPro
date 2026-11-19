@@ -1355,6 +1355,7 @@ async def ek_load(force: bool = False) -> dict:
         sched, sched_src = schedule_group(klass, groups)
         return {
             "groups": groups, "year": roc, "schedule_group": sched, "schedule_group_src": sched_src,
+            "schedule_no": (_S_GROUP.match(sched_src)["n"] if sched_src and _S_GROUP.match(sched_src) else None),
             "id": pid,
             "first_name": (p or {}).get("Firstname") or (z or {}).get("Jmeno"),
             "last_name": (p or {}).get("Lastname") or (z or {}).get("Prijmeni"),

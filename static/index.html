@@ -74,14 +74,13 @@
       <select id="eYear"><option value="">Všechny ročníky</option></select>
       <select id="eClass"><option value="">Všechny třídy</option></select>
       <select id="eSched"><option value="">Všechny rozvrhové skupiny</option></select>
-      <select id="eGroup"><option value="">Všechny skupiny</option></select>
       <label class="mute" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="eActive" checked> jen aktivní</label>
       <button class="btn primary" onclick="loadStudents(true)">↻ Načíst z Edookitu</button>
     </div>
     <div class="hint" id="eInfo" style="margin-bottom:8px"></div>
     <table>
-      <thead><tr><th>Příjmení a jméno</th><th>Ročník</th><th>Třída</th><th title="S skupina třídy, jinak celá třída – tvar jako v AD">Rozvrhová skupina</th><th>Další skupiny</th><th>Stav</th><th>E-mail</th><th>Karta</th><th>ID v Edookitu</th></tr></thead>
-      <tbody id="students"><tr><td colspan="9" class="mute">Klikněte na „Načíst z Edookitu“.</td></tr></tbody>
+      <thead><tr><th>Příjmení a jméno</th><th>Ročník</th><th>Třída</th><th title="Číslo S skupiny třídy (S1, S2); pomlčka = třída není dělená">Rozvrhová skupina</th><th>Stav</th><th>E-mail</th><th>Karta</th><th>ID v Edookitu</th></tr></thead>
+      <tbody id="students"><tr><td colspan="8" class="mute">Klikněte na „Načíst z Edookitu“.</td></tr></tbody>
     </table>
   </section>
 
@@ -939,8 +938,9 @@ async function loadStudents(refresh = false) {
     const num = (a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true});
     fill('#eClass', 'Všechny třídy', classes);
     fill('#eYear', 'Všechny ročníky', [...new Set(STUDENTS.map(s => s.year).filter(y => y !== null && y !== undefined && y !== ''))].sort(num));
-    fill('#eSched', 'Všechny rozvrhové skupiny', [...new Set(STUDENTS.map(s => s.schedule_group).filter(Boolean))].sort(num));
-    fill('#eGroup', 'Všechny skupiny', [...new Set(STUDENTS.flatMap(s => s.groups || []))].sort(num));
+    $('#eSched').innerHTML = '<option value="">Všechny rozvrhové skupiny</option>' +
+      [...new Set(STUDENTS.map(s => s.schedule_no).filter(Boolean))].sort(num).map(n => `<option value="${esc(n)}">skupina ${esc(n)}</option>`).join('') +
+      '<option value="-">bez skupiny (–)</option>';
     const src = {personal: 'osobní údaje', zaci: 'žáci (Docházka)', tridy: 'třídy', skupiny: 'skupiny'};
     $('#eInfo').textContent = `Načteno ${r.count} studentů · zdroje: ${r.sources.map(x => src[x] || x).join(', ')} · ${new Date(r.loaded).toLocaleTimeString('cs-CZ')}` +
       (r.group_stats && r.sources.includes('skupiny') ? ` · skupin ${r.group_stats.groups}, studentů se skupinou ${r.group_stats.students_in_groups}` +
@@ -952,22 +952,21 @@ async function loadStudents(refresh = false) {
 function renderStudents() {
   if (!STUDENTS) return;
   const q = $('#eq').value.toLowerCase(), cl = $('#eClass').value, onlyActive = $('#eActive').checked;
-  const yr = $('#eYear').value, gr = $('#eGroup').value, sg = $('#eSched').value;
+  const yr = $('#eYear').value, sg = $('#eSched').value;
   const list = STUDENTS.filter(s => (!cl || s.class === cl) && (!onlyActive || s.active !== false) &&
-    (!yr || String(s.year) === yr) && (!sg || s.schedule_group === sg) && (!gr || (s.groups || []).includes(gr)) &&
+    (!yr || String(s.year) === yr) && (!sg || (sg === '-' ? !s.schedule_no : s.schedule_no === sg)) &&
     (!q || [s.first_name, s.last_name, s.class, s.schedule_group, (s.groups || []).join(' '), s.email, s.card, s.card_number, s.id].join(' ').toLowerCase().includes(q)));
   $('#students').innerHTML = list.slice(0, 1000).map(s => `<tr class="click" onclick="openStudent('${esc(s.id)}')">
     <td><b>${esc(s.last_name)} ${esc(s.first_name)}</b></td>
     <td>${s.year ?? '<span class="mute">—</span>'}</td>
     <td>${s.class ? `<span class="pill role">${esc(s.class)}</span>` : '<span class="mute">—</span>'}</td>
-    <td>${s.schedule_group ? `<span class="pill role" title="Edookit: ${esc(s.schedule_group_src)}">${esc(s.schedule_group)}</span>` : '<span class="mute">—</span>'}</td>
-    <td>${(s.groups || []).filter(g => g !== s.schedule_group_src).map(g => `<span class="pill">${esc(g)}</span>`).join(' ') || '<span class="mute">—</span>'}</td>
+    <td>${s.schedule_no ? `<span class="pill role" title="Edookit: ${esc(s.schedule_group_src)} · AD: ${esc(s.schedule_group)}">${esc(s.schedule_no)}</span>` : '<span class="mute">—</span>'}</td>
     <td>${s.active === null || s.active === undefined ? '<span class="mute">—</span>' : s.active ? '<span class="pill ACTIVE">aktivní</span>' : '<span class="pill DEACTIVATED">neaktivní</span>'}</td>
     <td>${esc(s.email) || '<span class="mute">—</span>'}</td>
     <td>${s.card ? '💳 ' + esc(s.card) + (s.card_number ? ` <span class="mute">(${esc(s.card_number)})</span>` : '') : '<span class="mute">—</span>'}</td>
     <td class="mute">${esc(s.id)}</td></tr>`).join('')
-    || '<tr><td colspan="9" class="mute">Nic nenalezeno</td></tr>';
-  if (list.length > 1000) $('#students').insertAdjacentHTML('beforeend', `<tr><td colspan="9" class="mute">… a dalších ${list.length - 1000} – upřesněte hledání</td></tr>`);
+    || '<tr><td colspan="8" class="mute">Nic nenalezeno</td></tr>';
+  if (list.length > 1000) $('#students').insertAdjacentHTML('beforeend', `<tr><td colspan="8" class="mute">… a dalších ${list.length - 1000} – upřesněte hledání</td></tr>`);
 }
 function kvTable(obj) {
   const val = v => v === null || v === undefined || v === '' ? '<span class="mute">—</span>'
@@ -981,14 +980,14 @@ async function openStudent(id) {
     const d = await api('GET', `/api/edookit/students/${encodeURIComponent(id)}`);
     const s = (STUDENTS || []).find(x => String(x.id) === String(id)) || {};
     $('#sTitle').textContent = `${s.last_name || ''} ${s.first_name || ''}` + (s.class ? ` · ${s.class}` : '') +
-      (s.schedule_group ? ` · rozvrhová skupina ${s.schedule_group}` : '');
+      (s.schedule_no ? ` · skupina ${s.schedule_no}` : '');
     $('#sBody').innerHTML = d.sections.map(sec => `<section class="usec"><h3>${esc(sec.title)}</h3>
       ${sec.data ? kvTable(sec.data) : '<span class="mute">V tomto zdroji záznam není (nebo zdroj není nastaven).</span>'}</section>`).join('') +
       '<div class="hint">Rodné číslo a další citlivé identifikátory jsou skryté (•••).</div>';
     $('#sdlg').showModal();
   });
 }
-['#eq', '#eClass', '#eActive', '#eYear', '#eGroup', '#eSched'].forEach(s => $(s).addEventListener('input', renderStudents));
+['#eq', '#eClass', '#eActive', '#eYear', '#eSched'].forEach(s => $(s).addEventListener('input', renderStudents));
 
 // ---------- Active Directory
 const AD = {students: null, employees: null};
