@@ -1439,8 +1439,14 @@ def ad_connect(c: dict | None = None) -> ldap3.Connection:
     conn = ldap3.Connection(server, user=c.get("bind_user") or None, password=dec(c.get("bind_password")) or None,
                             authentication=ldap3.SIMPLE, receive_timeout=60, raise_exceptions=False, auto_referrals=False)
     try:
-        if not conn.open():
-            raise HTTPException(502, f"Řadič domény nedostupný ({host}:{port}{' přes tunel' if tunneled else ''})")
+        try:
+            opened = conn.open()
+            why = conn.last_error
+        except Exception as e:  # noqa: BLE001
+            opened, why = False, f"{type(e).__name__}: {e}"
+        if not opened:
+            raise HTTPException(502, f"Řadič domény nedostupný ({host}:{port}{' přes tunel' if tunneled else ''})"
+                                     + (f" – {why}" if why else ""))
         if mode == "starttls" and not conn.start_tls():
             raise HTTPException(502, f"StartTLS selhal: {conn.result.get('description')}")
         if not conn.bind():
@@ -1557,6 +1563,19 @@ def ad_diagnose(c: dict) -> list[dict]:
     if tun:
         if not ua.tunnel.running:
             return [{"ok": False, "text": "WireGuard tunel neběží – zkontrolujte připojení v Nastavení"}]
+        import ipaddress
+        allowed = []
+        for line in (dec(cfg.get("wg_conf")) or "").splitlines():
+            if line.strip().lower().startswith("allowedips"):
+                allowed += [x.strip() for x in line.split("=", 1)[1].split(",") if x.strip()]
+        try:
+            ip = ipaddress.ip_address(server)
+            if allowed and not any(ip in ipaddress.ip_network(a, strict=False) for a in allowed):
+                steps.append({"ok": False, "text": f"AllowedIPs ve WireGuard konfigurace SyncPro ({', '.join(allowed)}) neobsahují "
+                              f"{server} – provoz na řadič nejde do tunelu. Na UDM upravte klienta / stáhněte konfiguraci "
+                              f"s touto sítí a nahrajte ji v Nastavení, nebo přidejte síť do AllowedIPs."})
+        except ValueError:
+            pass
         for (lport, target) in tun:
             port = int(target.rsplit(":", 1)[1])
             ok, msg = ad_port_probe("127.0.0.1", lport, tls=(port == 636))
