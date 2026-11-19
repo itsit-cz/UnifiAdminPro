@@ -1440,8 +1440,9 @@ def ad_connect(c: dict | None = None) -> ldap3.Connection:
                             authentication=ldap3.SIMPLE, receive_timeout=60, raise_exceptions=False, auto_referrals=False)
     try:
         try:
-            opened = conn.open()
-            why = conn.last_error
+            conn.open()  # ldap3: open() nic nevrací, úspěch poznáme podle conn.closed
+            opened = not conn.closed
+            why = None if opened else conn.last_error
         except Exception as e:  # noqa: BLE001
             opened, why = False, f"{type(e).__name__}: {e}"
         if not opened:
