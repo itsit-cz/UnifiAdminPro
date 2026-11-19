@@ -51,3 +51,4 @@
   .badge { font-size:12px; padding:2px 10px; border-radius:10px; }
   .right { margin-left:auto; display:flex; gap:10px; align-items:center; }
   .err { color:var(--red); margin-top:10px; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
