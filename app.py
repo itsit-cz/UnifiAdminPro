@@ -1298,8 +1298,13 @@ async def ek_load(force: bool = False) -> dict:
     for i, g in enumerate(skup):
         gid = ci(g, "PkKlasSkupina", "PkSkupina", "Id")
         gid = str(gid if gid is not None else f"#{i}")
-        mem_key = next((k for k, v in g.items() if isinstance(v, list)), None)
-        members = [member_id(m) for m in (g.get(mem_key) or [])] if mem_key else []
+        # Zaci bývá {"PkZak": [8324, 8343, …]}, případně přímo seznam ID / objektů
+        mem_key = next((k for k, v in g.items() if isinstance(v, list) or
+                        (isinstance(v, dict) and any(isinstance(x, list) for x in v.values()))), None)
+        raw = g.get(mem_key) if mem_key else None
+        if isinstance(raw, dict):
+            raw = next((x for x in raw.values() if isinstance(x, list)), [])
+        members = [member_id(m) for m in (raw or [])]
         info = {k: v for k, v in g.items() if k != mem_key}
         info.setdefault("Zkratka", ci(g, "Zkratka", "Nazev", "Name"))
         gmap[gid] = {**info, "PocetZaku": len(members)}
