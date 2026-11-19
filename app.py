@@ -1137,7 +1137,9 @@ async def ek_try(path: str, method: str, auth: str) -> dict:
         return {"path": path, "method": method, "auth": auth, "status": None, "error": f"{type(e).__name__}"}
     ct = r.headers.get("content-type", "")
     out = {"path": path, "method": method, "auth": auth, "status": r.status_code, "content_type": ct.split(";")[0],
-           "size": len(r.content), "location": r.headers.get("location")}
+           "size": len(r.content), "location": r.headers.get("location"),
+           "www_authenticate": r.headers.get("www-authenticate"),
+           "headers": {k: v for k, v in r.headers.items() if k.lower().startswith(("x-", "www-")) and "cookie" not in k.lower()}}
     if "json" in ct:
         try:
             data = r.json()

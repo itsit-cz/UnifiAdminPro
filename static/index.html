@@ -834,8 +834,10 @@ async function ekProbe(custom = false) {
         <td>${st(x.status)}</td>
         <td><code>${esc(x.method)} ${esc(x.path)}</code> <span class="mute">${esc(x.auth)}</span>
           ${x.items != null ? `<br><b>${x.items} záznamů</b> · pole: <span class="mute">${esc((x.keys || []).join(', '))}</span>` : ''}
-          ${x.location ? `<br><span class="mute">→ ${esc(x.location)}</span>` : ''}${x.error ? `<br><span class="mute">${esc(x.error)}</span>` : ''}
-          ${x.sample ? `<details><summary class="mute">odpověď (${esc(x.content_type || '')}, ${x.size} B)</summary><div class="fp">${esc(x.sample)}</div></details>` : ''}</td>
+          ${x.location ? `<br><span class="mute">→ ${esc(x.location)}</span>` : ''}
+          ${x.www_authenticate ? `<br><span class="mute">WWW-Authenticate: <b>${esc(x.www_authenticate)}</b></span>` : ''}
+          ${x.headers && Object.keys(x.headers).length ? `<br><span class="mute" style="font-size:11px">${esc(Object.entries(x.headers).map(([k, v]) => k + ': ' + v).join(' · '))}</span>` : ''}${x.error ? `<br><span class="mute">${esc(x.error)}</span>` : ''}
+          ${x.sample !== undefined && x.sample !== '' ? `<details><summary class="mute">odpověď (${esc(x.content_type || '')}, ${x.size} B)</summary><div class="fp">${esc(x.sample)}</div></details>` : ''}</td>
         <td class="act">${x.items ? `<button class="btn sm primary" onclick="ekUse(${i})">Použít jako zdroj studentů</button>` : ''}</td>
       </tr>`;
     const main = EKRES.map((x, i) => [x, i]).filter(([x]) => x.status !== 404);
