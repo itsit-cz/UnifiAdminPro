@@ -81,3 +81,8 @@
   code { font-size:12px; }
   .form .bar select, .form .bar input:not(.grow) { width:auto; }
   .form .bar .grow { flex:1; width:auto; }
+  tr.click { cursor:pointer; }
+  tr.click:hover td { background:#f7f9fc; }
+  table.kv { width:100%; margin:2px 0; }
+  table.kv td:first-child { width:34%; white-space:nowrap; font-size:12px; }
+  table.kv table.kv { background:#fafbfc; }

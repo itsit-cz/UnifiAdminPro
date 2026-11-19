@@ -1150,6 +1150,7 @@ async def ek_config_save(e: EdookitCfgIn, who: str = Depends(admin)):
     new.pop("module", None)
     cfg["edookit"] = new
     save_cfg(cfg)
+    _ek_cache.update(t=0.0, data=None)
     audit(who, "edookit_config", {"url": url, "basic": ek_has(new, "basic"), "hmac": ek_has(new, "hmac")})
     return {"ok": True}
 
@@ -1210,51 +1211,101 @@ def ek_pick(row: dict, *names):
     return None
 
 
-def ek_default_source(c: dict) -> dict | None:
-    if c.get("source"):
-        return c["source"]
-    if ek_has(c, "basic"):
-        return {"path": "/api/student-data/v1/list", "method": "GET", "auth": "basic"}
-    if ek_has(c, "hmac"):
-        return {"path": "/api/dochazka/v2/zaci", "method": "GET", "auth": "hmac"}
-    return None
+_ek_cache: dict = {"t": 0.0, "data": None}
 
 
-@app.get("/api/edookit/students")
-async def ek_students(_: str = Depends(admin)):
-    c = ek_cfg()
-    src = ek_default_source(c)
-    if not src:
-        raise HTTPException(409, "Edookit není nastaven – vyplňte přístupové údaje v Nastavení → Edookit")
-    try:
-        r = await ek_request(src["path"], src.get("method", "GET"), src.get("auth", "basic"), timeout=90)
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"Edookit nedostupný ({type(e).__name__})")
+async def ek_fetch_list(path: str, auth: str) -> list:
+    r = await ek_request(path, "GET", auth, timeout=120)
     if r.status_code != 200:
-        raise HTTPException(502, f"Edookit vrátil HTTP {r.status_code} pro {src['path']}: {ek_mask(r.text[:200])}")
+        raise HTTPException(502, f"Edookit vrátil HTTP {r.status_code} pro {path}")
     try:
         lst = ek_find_list(r.json())
     except ValueError:
-        raise HTTPException(502, "Edookit nevrátil JSON")
+        raise HTTPException(502, f"Edookit nevrátil JSON pro {path}")
     if lst is None:
-        raise HTTPException(502, "V odpovědi Edookitu není seznam záznamů")
-    known = {"personid", "pkzak", "id", "firstname", "jmeno", "lastname", "prijmeni", "classname", "classnames",
-             "tridazkratka", "email", "karta", "card", "active", "aktivni"}
+        raise HTTPException(502, f"V odpovědi {path} není seznam záznamů")
+    return lst
+
+
+async def ek_load(force: bool = False) -> dict:
+    """Studenti = osobní údaje (aktuální studenti), doplnění z API Docházka (e-mail, karta, třída).
+    Bez osobních údajů se použijí žáci z API Docházka. Drží se jen v paměti (5 min)."""
+    if not force and _ek_cache["data"] and time.time() - _ek_cache["t"] < 300:
+        return _ek_cache["data"]
+    c = ek_cfg()
+    if not (ek_has(c, "basic") or ek_has(c, "hmac")):
+        raise HTTPException(409, "Edookit není nastaven – vyplňte přístupové údaje v Nastavení → Edookit")
+    jobs = {}
+    if ek_has(c, "basic"):
+        jobs["personal"] = ek_fetch_list("/api/student-data/v1/list", "basic")
+    if ek_has(c, "hmac"):
+        jobs["zaci"] = ek_fetch_list("/api/dochazka/v2/zaci", "hmac")
+        jobs["tridy"] = ek_fetch_list("/api/dochazka/v2/tridy", "hmac")
+    res = dict(zip(jobs, await asyncio.gather(*jobs.values(), return_exceptions=True)))
+    warnings = []
+    for k, v in list(res.items()):
+        if isinstance(v, Exception):
+            warnings.append(f"{k}: {getattr(v, 'detail', None) or type(v).__name__}")
+            res[k] = None
+    personal, zaci, tridy = res.get("personal"), res.get("zaci"), res.get("tridy")
+    if personal is None and zaci is None:
+        raise HTTPException(502, "Edookit: nepodařilo se načíst studenty – " + "; ".join(warnings))
+    tmap = {t.get("PkTrida"): t for t in tridy or []}
+    zmap = {z.get("PkZak"): z for z in zaci or []}
+    pmap = {}
     rows = []
-    for x in lst:
-        active = ek_pick(x, "active", "aktivni")
-        rows.append({
-            "id": ek_pick(x, "personid", "pkzak", "id"),
-            "first_name": ek_pick(x, "firstname", "jmeno"),
-            "last_name": ek_pick(x, "lastname", "prijmeni"),
-            "class": ek_pick(x, "classname", "classnames", "tridazkratka"),
-            "email": ek_pick(x, "email"),
-            "card": ek_pick(x, "karta", "card"),
-            "active": None if active is None else bool(active),
-            "extra": {k: v for k, v in x.items() if k.lower() not in EDOOKIT_SENSITIVE and k.lower() not in known},
-        })
-    print(f"[edookit] načteno studentů: {len(rows)} ({src['path']})", flush=True)
-    return {"count": len(rows), "source": src, "students": rows}
+
+    def make(pid, p, z):
+        t = tmap.get((z or {}).get("PkTrida"))
+        return {
+            "id": pid,
+            "first_name": (p or {}).get("Firstname") or (z or {}).get("Jmeno"),
+            "last_name": (p or {}).get("Lastname") or (z or {}).get("Prijmeni"),
+            "class": (p or {}).get("ClassName") or (t or {}).get("Zkratka"),
+            "email": (z or {}).get("Email") or (p or {}).get("Email"),
+            "card": (z or {}).get("Karta"),
+            "card_number": (z or {}).get("KartaCislo"),
+            "active": (z or {}).get("AktivniEvidence") if z else (True if p else None),
+            "in_personal": p is not None, "in_zaci": z is not None,
+        }
+
+    if personal is not None:
+        for p in personal:
+            pid = p.get("PersonId")
+            pmap[pid] = p
+            rows.append(make(pid, p, zmap.get(pid)))
+    else:
+        for z in zaci:
+            rows.append(make(z.get("PkZak"), None, z))
+    data = {"rows": rows, "personal": pmap, "zaci": zmap, "tridy": tmap, "warnings": warnings,
+            "sources": [k for k in ("personal", "zaci", "tridy") if res.get(k) is not None],
+            "loaded": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    _ek_cache.update(t=time.time(), data=data)
+    print(f"[edookit] načteno studentů: {len(rows)} (zdroje: {', '.join(data['sources'])}"
+          f"{'; varování: ' + '; '.join(warnings) if warnings else ''})", flush=True)
+    return data
+
+
+@app.get("/api/edookit/students")
+async def ek_students(refresh: bool = False, _: str = Depends(admin)):
+    d = await ek_load(force=refresh)
+    return {"count": len(d["rows"]), "sources": d["sources"], "warnings": d["warnings"], "loaded": d["loaded"],
+            "students": d["rows"]}
+
+
+@app.get("/api/edookit/students/{sid}")
+async def ek_student(sid: str, _: str = Depends(admin)):
+    d = await ek_load()
+    key = next((k for k in list(d["personal"]) + list(d["zaci"]) if str(k) == sid), None)
+    if key is None:
+        raise HTTPException(404, "Student nenalezen (zkuste načíst seznam znovu)")
+    p, z = d["personal"].get(key), d["zaci"].get(key)
+    t = d["tridy"].get((z or {}).get("PkTrida"))
+    return {"id": key, "sections": [
+        {"title": "Osobní údaje studentů (/api/student-data/v1/list)", "data": ek_scrub(p) if p else None},
+        {"title": "API Docházka – žák (/api/dochazka/v2/zaci)", "data": ek_scrub(z) if z else None},
+        {"title": "API Docházka – třída (/api/dochazka/v2/tridy)", "data": t},
+    ]}
 
 
 # ---------------------------------------------------------------- detail a úprava uživatele

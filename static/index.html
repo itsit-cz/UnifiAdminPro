@@ -69,12 +69,13 @@
     <div class="bar">
       <input id="eq" placeholder="Hledat jméno, třídu…" class="grow">
       <select id="eClass"><option value="">Všechny třídy</option></select>
-      <button class="btn primary" onclick="loadStudents()">↻ Načíst z Edookitu</button>
+      <label class="mute" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="eActive" checked> jen aktivní</label>
+      <button class="btn primary" onclick="loadStudents(true)">↻ Načíst z Edookitu</button>
     </div>
     <div class="hint" id="eInfo" style="margin-bottom:8px"></div>
     <table>
-      <thead><tr><th>Příjmení a jméno</th><th>Třída</th><th>Stav</th><th>E-mail</th><th>Karta</th><th>ID v Edookitu</th><th>Další údaje</th></tr></thead>
-      <tbody id="students"><tr><td colspan="7" class="mute">Klikněte na „Načíst z Edookitu“.</td></tr></tbody>
+      <thead><tr><th>Příjmení a jméno</th><th>Třída</th><th>Stav</th><th>E-mail</th><th>Karta</th><th>ID v Edookitu</th></tr></thead>
+      <tbody id="students"><tr><td colspan="6" class="mute">Klikněte na „Načíst z Edookitu“.</td></tr></tbody>
     </table>
   </section>
 
@@ -296,6 +297,12 @@
       <div class="hint">Vyžaduje UniFi Access 3.3.10+ a kameru s rozpoznáváním SPZ.</div>
     </section>
   </form>
+</dialog>
+
+<!-- dialog: detail studenta z Edookitu -->
+<dialog id="sdlg" class="wide">
+  <div class="dhead"><h2 id="sTitle"></h2><button class="btn sm" style="margin-left:auto" onclick="$('#sdlg').close()">✕ Zavřít</button></div>
+  <div id="sBody"></div>
 </dialog>
 
 <div id="toast"></div>
@@ -825,8 +832,7 @@ async function ekLoad() {
   const ph = (sel, set) => { $(sel).value = ''; $(sel).placeholder = set ? '•••••• (uloženo)' : ''; };
   ph('#ekPw', EK.has_password); ph('#ekClient', EK.hmac_set.client); ph('#ekSign', EK.hmac_set.sign);
   ph('#ekCode', EK.hmac_set.code); ph('#ekApiPw', EK.hmac_set.api_password);
-  $('#ekSource').innerHTML = EK.source ? `Zdroj studentů: <b>${esc(EK.source.path)}</b> (${EK.source.auth === 'hmac' ? 'API Docházka' : 'osobní údaje'})`
-    : 'Zdroj studentů: automaticky (osobní údaje, jinak API Docházka).';
+  $('#ekSource').innerHTML = 'Studenti = osobní údaje (aktuální studenti) doplněné z API Docházka o e-mail, kartu a třídu. Bez osobních údajů se použijí žáci z API Docházka.';
 }
 const ekSave = () => run(async () => {
   await api('POST', '/api/edookit/config', {url: $('#ekUrl').value, username: $('#ekUser').value, password: $('#ekPw').value,
@@ -848,7 +854,7 @@ async function ekProbe(custom = false) {
           ${x.error ? `<br><span class="mute">${esc(x.error)}</span>` : ''}
           ${x.www_authenticate ? `<br><span class="mute">WWW-Authenticate: ${esc(x.www_authenticate)}</span>` : ''}
           ${x.sample ? `<details><summary class="mute">odpověď (${esc(x.content_type || '')}, ${x.size} B)</summary><div class="fp">${esc(x.sample)}</div></details>` : ''}</td>
-        <td class="act">${x.items && /zaci|student-data|^\/api\/(?!dochazka)/.test(x.path) ? `<button class="btn sm primary" onclick="ekUse(${i})">Použít jako zdroj studentů</button>` : ''}</td>
+        <td></td>
       </tr>`).join('') + '</tbody></table>';
   } catch (e) { $('#ekRes').innerHTML = '❌ ' + esc(e.message); }
 }
@@ -857,31 +863,54 @@ const ekUse = i => run(async () => {
   await api('POST', '/api/edookit/source', {path: x.path, method: x.method, auth: x.auth});
   await ekLoad(); STUDENTS = null;
 }, 'Zdroj studentů nastaven');
-async function loadStudents() {
+async function loadStudents(refresh = false) {
   $('#eInfo').textContent = '⏳ Načítám z Edookitu…';
   try {
-    const r = await api('GET', '/api/edookit/students');
+    const r = await api('GET', '/api/edookit/students' + (refresh ? '?refresh=1' : ''));
     STUDENTS = r.students.sort((a, b) => `${a.last_name} ${a.first_name}`.localeCompare(`${b.last_name} ${b.first_name}`, 'cs'));
     const classes = [...new Set(STUDENTS.map(s => s.class).filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b), 'cs', {numeric: true}));
     const cur = $('#eClass').value;
     $('#eClass').innerHTML = '<option value="">Všechny třídy</option>' + classes.map(c => `<option ${c === cur ? 'selected' : ''}>${esc(c)}</option>`).join('');
-    $('#eInfo').textContent = `Načteno ${r.count} studentů z ${r.source.path} (${new Date().toLocaleTimeString('cs-CZ')}). Data se neukládají, načítají se vždy živě.`;
+    const src = {personal: 'osobní údaje', zaci: 'žáci (Docházka)', tridy: 'třídy'};
+    $('#eInfo').textContent = `Načteno ${r.count} studentů · zdroje: ${r.sources.map(x => src[x] || x).join(', ')} · ${new Date(r.loaded).toLocaleTimeString('cs-CZ')}` +
+      (r.warnings.length ? ` · ⚠ ${r.warnings.join('; ')}` : '') + ' · data se neukládají (jen dočasně v paměti).';
     renderStudents();
   } catch (e) { $('#eInfo').textContent = '❌ ' + e.message; }
 }
 function renderStudents() {
   if (!STUDENTS) return;
-  const q = $('#eq').value.toLowerCase(), cl = $('#eClass').value;
-  const list = STUDENTS.filter(s => (!cl || s.class === cl) && (!q || [s.first_name, s.last_name, s.class, s.email].join(' ').toLowerCase().includes(q)));
-  $('#students').innerHTML = list.map(s => `<tr><td><b>${esc(s.last_name)} ${esc(s.first_name)}</b></td>
+  const q = $('#eq').value.toLowerCase(), cl = $('#eClass').value, onlyActive = $('#eActive').checked;
+  const list = STUDENTS.filter(s => (!cl || s.class === cl) && (!onlyActive || s.active !== false) &&
+    (!q || [s.first_name, s.last_name, s.class, s.email, s.card, s.card_number, s.id].join(' ').toLowerCase().includes(q)));
+  $('#students').innerHTML = list.slice(0, 1000).map(s => `<tr class="click" onclick="openStudent('${esc(s.id)}')">
+    <td><b>${esc(s.last_name)} ${esc(s.first_name)}</b></td>
     <td>${s.class ? `<span class="pill role">${esc(s.class)}</span>` : '<span class="mute">—</span>'}</td>
     <td>${s.active === null || s.active === undefined ? '<span class="mute">—</span>' : s.active ? '<span class="pill ACTIVE">aktivní</span>' : '<span class="pill DEACTIVATED">neaktivní</span>'}</td>
-    <td>${esc(s.email) || '<span class="mute">—</span>'}</td><td class="mute">${s.card ? '💳 ' + esc(s.card) : '—'}</td><td class="mute">${esc(s.id)}</td>
-    <td class="mute" style="font-size:12px">${esc(Object.entries(s.extra || {}).filter(([k, v]) => v !== null && v !== '').map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' · ').slice(0, 160))}</td></tr>`).join('')
-    || '<tr><td colspan="7" class="mute">Nic nenalezeno</td></tr>';
-  $('#eInfo').dataset.shown = list.length;
+    <td>${esc(s.email) || '<span class="mute">—</span>'}</td>
+    <td>${s.card ? '💳 ' + esc(s.card) + (s.card_number ? ` <span class="mute">(${esc(s.card_number)})</span>` : '') : '<span class="mute">—</span>'}</td>
+    <td class="mute">${esc(s.id)}</td></tr>`).join('')
+    || '<tr><td colspan="6" class="mute">Nic nenalezeno</td></tr>';
+  if (list.length > 1000) $('#students').insertAdjacentHTML('beforeend', `<tr><td colspan="6" class="mute">… a dalších ${list.length - 1000} – upřesněte hledání</td></tr>`);
 }
-['#eq', '#eClass'].forEach(s => $(s).addEventListener('input', renderStudents));
+function kvTable(obj) {
+  const val = v => v === null || v === undefined || v === '' ? '<span class="mute">—</span>'
+    : typeof v === 'boolean' ? (v ? '✅ ano' : '✖ ne')
+    : Array.isArray(v) ? (v.length && typeof v[0] === 'object' ? v.map(x => kvTable(x)).join('') : esc(v.join(', ')) || '<span class="mute">—</span>')
+    : typeof v === 'object' ? kvTable(v) : esc(v);
+  return '<table class="mini kv"><tbody>' + Object.entries(obj).map(([k, v]) => `<tr><td class="mute">${esc(k)}</td><td>${val(v)}</td></tr>`).join('') + '</tbody></table>';
+}
+async function openStudent(id) {
+  await run(async () => {
+    const d = await api('GET', `/api/edookit/students/${encodeURIComponent(id)}`);
+    const s = (STUDENTS || []).find(x => String(x.id) === String(id)) || {};
+    $('#sTitle').textContent = `${s.last_name || ''} ${s.first_name || ''}` + (s.class ? ` · ${s.class}` : '');
+    $('#sBody').innerHTML = d.sections.map(sec => `<section class="usec"><h3>${esc(sec.title)}</h3>
+      ${sec.data ? kvTable(sec.data) : '<span class="mute">V tomto zdroji záznam není (nebo zdroj není nastaven).</span>'}</section>`).join('') +
+      '<div class="hint">Rodné číslo a další citlivé identifikátory jsou skryté (•••).</div>';
+    $('#sdlg').showModal();
+  });
+}
+['#eq', '#eClass', '#eActive'].forEach(s => $(s).addEventListener('input', renderStudents));
 
 (async () => { await loadStatus(); await loadUsers(); loadVersion(); })();
 </script>
