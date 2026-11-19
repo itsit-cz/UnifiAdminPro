@@ -1267,6 +1267,7 @@ async def ek_load(force: bool = False) -> dict:
     if ek_has(c, "hmac"):
         jobs["zaci"] = ek_fetch_list("/api/dochazka/v2/zaci", "hmac")
         jobs["tridy"] = ek_fetch_list("/api/dochazka/v2/tridy", "hmac")
+        jobs["skupiny"] = ek_fetch_list("/api/dochazka/v2/klas-skupiny", "hmac")
     res = dict(zip(jobs, await asyncio.gather(*jobs.values(), return_exceptions=True)))
     warnings = []
     for k, v in list(res.items()):
@@ -1277,17 +1278,37 @@ async def ek_load(force: bool = False) -> dict:
     if personal is None and zaci is None:
         raise HTTPException(502, "Edookit: nepodařilo se načíst studenty – " + "; ".join(warnings))
     tmap = {t.get("PkTrida"): t for t in tridy or []}
+    # Klasifikační skupiny (např. 1A1, 1A2): [{PkKlasSkupina, Zkratka, EvSkupina, Zaci: [{PkZak}…]}].
+    # Starý sync bral zkratku skupiny jako „studijní skupinu“ studenta (přepíše třídu).
+    gmap, by_zak = {}, {}
+    for g in res.get("skupiny") or []:
+        gid = g.get("PkKlasSkupina")
+        if gid is None:
+            continue
+        members = [(m.get("PkZak") if isinstance(m, dict) else m) for m in (g.get("Zaci") or [])]
+        gmap[gid] = {**{k: v for k, v in g.items() if k != "Zaci"}, "PocetZaku": len(members)}
+        for zid in members:
+            if zid is not None:
+                by_zak.setdefault(zid, []).append(gid)
     zmap = {z.get("PkZak"): z for z in zaci or []}
     pmap = {}
     rows = []
 
     def make(pid, p, z):
         t = tmap.get((z or {}).get("PkTrida"))
+        gids = by_zak.get(pid, [])
+        groups = sorted({str(gmap[g].get("Zkratka")) for g in gids if gmap[g].get("Zkratka")})
+        klass = (p or {}).get("ClassName") or (t or {}).get("Zkratka")
+        roc = (t or {}).get("Rocnik")
+        if roc in (None, ""):
+            first = next((x for x in [*groups, klass] if x and str(x)[0].isdigit()), None)
+            roc = int(str(first)[0]) if first else None
         return {
+            "groups": groups, "year": roc,
             "id": pid,
             "first_name": (p or {}).get("Firstname") or (z or {}).get("Jmeno"),
             "last_name": (p or {}).get("Lastname") or (z or {}).get("Prijmeni"),
-            "class": (p or {}).get("ClassName") or (t or {}).get("Zkratka"),
+            "class": klass,
             "email": (z or {}).get("Email") or (p or {}).get("Email"),
             "card": (z or {}).get("Karta"),
             "card_number": (z or {}).get("KartaCislo"),
@@ -1303,8 +1324,9 @@ async def ek_load(force: bool = False) -> dict:
     else:
         for z in zaci:
             rows.append(make(z.get("PkZak"), None, z))
-    data = {"rows": rows, "personal": pmap, "zaci": zmap, "tridy": tmap, "warnings": warnings,
-            "sources": [k for k in ("personal", "zaci", "tridy") if res.get(k) is not None],
+    data = {"rows": rows, "personal": pmap, "zaci": zmap, "tridy": tmap, "skupiny": gmap, "by_zak": by_zak,
+            "warnings": warnings,
+            "sources": [k for k in ("personal", "zaci", "tridy", "skupiny") if res.get(k) is not None],
             "loaded": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     _ek_cache.update(t=time.time(), data=data)
     print(f"[edookit] načteno studentů: {len(rows)} (zdroje: {', '.join(data['sources'])}"
@@ -1331,6 +1353,8 @@ async def ek_student(sid: str, _: str = Depends(admin)):
         {"title": "Osobní údaje studentů (/api/student-data/v1/list)", "data": ek_scrub(p) if p else None},
         {"title": "API Docházka – žák (/api/dochazka/v2/zaci)", "data": ek_scrub(z) if z else None},
         {"title": "API Docházka – třída (/api/dochazka/v2/tridy)", "data": t},
+        {"title": "API Docházka – skupiny žáka (/api/dochazka/v2/klas-skupiny)",
+         "data": {str(d["skupiny"][g].get("Zkratka") or g): d["skupiny"][g] for g in d["by_zak"].get(key, [])} or None},
     ]}
 
 
