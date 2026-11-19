@@ -86,3 +86,6 @@
   table.kv { width:100%; margin:2px 0; }
   table.kv td:first-child { width:34%; white-space:nowrap; font-size:12px; }
   table.kv table.kv { background:#fafbfc; }
+
+  table.cmp td.bad, table.kv tr.bad td { background:#fdecec; }
+  table.cmp td.bad { box-shadow: inset 3px 0 0 var(--red); }

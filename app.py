@@ -1733,6 +1733,10 @@ async def ad_ous(_: str = Depends(admin)):
 
 @app.get("/api/ad/users")
 async def ad_users(kind: str = "students", refresh: bool = False, _: str = Depends(admin)):
+    return await ad_load(kind, refresh)
+
+
+async def ad_load(kind: str = "students", refresh: bool = False) -> dict:
     if kind not in ("students", "employees"):
         raise HTTPException(400, "kind musí být students nebo employees")
     c = ad_cfg()
@@ -1760,6 +1764,92 @@ async def ad_users(kind: str = "students", refresh: bool = False, _: str = Depen
     _ad_cache[kind] = {"t": time.time(), "data": data}
     print(f"[ad] načteno {kind}: {len(rows)} z {base}", flush=True)
     return data
+
+
+# ---------------------------------------------------------------- porovnání Edookit ↔ AD (studenti)
+def _norm(v) -> str:
+    return " ".join(str(v or "").split()).casefold()
+
+
+def _card(v) -> str:
+    return str(v or "").strip().upper()
+
+
+@app.get("/api/compare/ek-ad")
+async def compare_ek_ad(refresh: bool = False, _: str = Depends(admin)):
+    """Edookit je zdroj pravdy. Párování: edookitPersonID v AD = PersonId/PkZak v Edookitu,
+    náhradně jednoznačná shoda e-mailu nebo jména."""
+    ek, ad = await asyncio.gather(ek_load(force=refresh), ad_load("students", refresh))
+    ek_rows = ek["rows"]
+    ad_rows = ad["users"]
+    by_id = {}
+    for a in ad_rows:
+        if a.get("edookit_id"):
+            by_id.setdefault(str(a["edookit_id"]).strip(), []).append(a)
+    by_name = {}
+    for a in ad_rows:
+        by_name.setdefault((_norm(a.get("first_name")), _norm(a.get("last_name"))), []).append(a)
+    used, out = set(), []
+
+    def pick(cands):
+        cands = [c for c in cands if c["dn"] not in used]
+        if not cands:
+            return None
+        if len(cands) > 1:  # víc účtů – preferuj aktivní mimo vyřazené OU
+            act = [c for c in cands if c["enabled"] and not c.get("excluded_ou")]
+            cands = act or cands
+        return cands[0]
+
+    for e in ek_rows:
+        how, a = "id", pick(by_id.get(str(e["id"]), []))
+        if not a:
+            cands = [c for c in by_name.get((_norm(e.get("first_name")), _norm(e.get("last_name"))), [])
+                     if not c.get("edookit_id")]
+            if len(cands) == 1:
+                how, a = "jméno", pick(cands)
+        if a:
+            used.add(a["dn"])
+        out.append((e, a, how if a else None))
+    for a in ad_rows:
+        if a["dn"] not in used:
+            out.append((None, a, None))
+
+    rows = []
+    for e, a, how in out:
+        ek_active = bool(e) and e.get("active") is not False
+        ad_active = bool(a) and a["enabled"] and not a.get("excluded_ou")
+        diffs = []
+        if e and a:
+            if (_norm(e.get("first_name")), _norm(e.get("last_name"))) != (_norm(a.get("first_name")), _norm(a.get("last_name"))):
+                diffs.append("jméno")
+            ad_cls = [x.strip() for x in (a.get("class") or "").split(",") if x.strip()]
+            if ek_active and e.get("schedule_group") and e["schedule_group"].casefold() not in [x.casefold() for x in ad_cls]:
+                diffs.append("skupina")
+            if _card(e.get("card")) != _card(a.get("card_edookit")):
+                diffs.append("karta")
+            if ek_active != ad_active:
+                diffs.append("stav")
+            if how != "id":
+                diffs.append("edookit id")
+            status = "diff" if diffs else "ok"
+        elif e:
+            status = "ek_only" if ek_active else "ek_only_inactive"
+        else:
+            status = "ad_only" if ad_active else "ad_only_inactive"
+        rows.append({
+            "status": status, "diffs": diffs, "match": how,
+            "ek": e and {k: e.get(k) for k in ("id", "first_name", "last_name", "class", "schedule_group",
+                                               "schedule_no", "card", "active", "year")},
+            "ad": a and {k: a.get(k) for k in ("dn", "login", "first_name", "last_name", "name", "class", "card_ad",
+                                               "card_edookit", "edookit_id", "enabled", "excluded_ou", "email")},
+        })
+    counts = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+        for d in r["diffs"]:
+            counts["d:" + d] = counts.get("d:" + d, 0) + 1
+    return {"rows": rows, "counts": counts, "ek_loaded": ek["loaded"], "ad_loaded": ad["loaded"],
+            "ek_count": len(ek_rows), "ad_count": len(ad_rows), "warnings": ek["warnings"]}
 
 
 @app.get("/api/ad/user")
