@@ -72,3 +72,5 @@
   #gTable input:not([type=checkbox]) { width:100%; }
   .form .checks input { width:auto; }
   .checks label { display:flex; gap:8px; align-items:center; font-weight:normal; margin:4px 0; }
+  dialog.readonly .usec input, dialog.readonly .usec select, dialog.readonly .usec button { pointer-events:none; opacity:.55; }
+  dialog.readonly .usec details { display:none; }

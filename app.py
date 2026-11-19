@@ -403,14 +403,26 @@ def invalidate_members():
     _members["t"] = 0.0
 
 
-async def check_scope(who: str, uid: str):
-    """Operátor smí pracovat jen s uživateli ve svých rolích."""
+def can_manage(cfg: dict, acc: dict, role_id: str | None) -> bool:
+    """Správce vše; operátor uživatele ve svých rolích, s volbou see_all i uživatele bez role."""
+    if acc.get("role") == "admin":
+        return True
+    return role_id in allowed_role_ids(cfg, acc) or (acc.get("see_all") and not role_id)
+
+
+def can_view(cfg: dict, acc: dict, role_id: str | None) -> bool:
+    return can_manage(cfg, acc, role_id) or bool(acc.get("see_all"))
+
+
+async def check_scope(who: str, uid: str, write: bool = True):
+    """Operátor smí pracovat jen s uživateli ve svých rolích (see_all: vidí všechny, upravuje i bez role)."""
     cfg = load_cfg()
     acc = get_account(cfg, who)
     if acc.get("role") == "admin":
         return
-    if (await membership()).get(uid) not in allowed_role_ids(cfg, acc):
-        raise HTTPException(403, "Tento uživatel nepatří do vašich rolí")
+    rid = (await membership()).get(uid)
+    if not (can_manage if write else can_view)(cfg, acc, rid):
+        raise HTTPException(403, "Tento uživatel nepatří do vašich rolí" + (" – můžete ho jen prohlížet" if can_view(cfg, acc, rid) else ""))
 
 
 FAILS: dict[str, list[float]] = {}
@@ -626,7 +638,8 @@ async def status(who: str = Depends(auth)):
     cfg = load_cfg()
     acc = get_account(cfg, who)
     wg = dec(cfg.get("wg_conf"))
-    base = {"user": who, "account_role": acc.get("role"), "site_name": cfg.get("site_name"),
+    base = {"user": who, "account_role": acc.get("role"), "see_all": bool(acc.get("see_all")),
+            "site_name": cfg.get("site_name"),
             "roles": [r for r in mapped_roles(cfg) if r["group_id"] in allowed_role_ids(cfg, acc)]}
     if acc.get("role") != "admin":
         return {**base, "wireguard": bool(wg), "tunnel_up": ua.tunnel.running,
@@ -711,7 +724,8 @@ async def users(who: str = Depends(auth)):
     out = []
     for u in await ua.all_pages("/users", {"expand[]": "access_policy"}):
         u["role_id"] = m.get(u.get("id"))
-        if acc.get("role") == "admin" or u["role_id"] in allowed:
+        if can_view(cfg, acc, u["role_id"]):
+            u["can_manage"] = can_manage(cfg, acc, u["role_id"])
             out.append(u)
     return out
 
@@ -835,15 +849,15 @@ async def groups(_: str = Depends(admin)):
 async def roles(who: str = Depends(auth)):
     cfg = load_cfg()
     acc = get_account(cfg, who)
-    out = []
+    out, allowed = [], allowed_role_ids(cfg, acc)
     for r in mapped_roles(cfg):
-        if r["group_id"] not in allowed_role_ids(cfg, acc):
+        if r["group_id"] not in allowed and not acc.get("see_all"):
             continue
         try:
             pol = (await ua.request("GET", f"/user_groups/{r['group_id']}/access_policies"))["data"] or []
         except HTTPException:
             pol = []
-        out.append({**r, "policies": [x.get("name") for x in pol]})
+        out.append({**r, "policies": [x.get("name") for x in pol], "allowed": r["group_id"] in allowed})
     return out
 
 
@@ -868,11 +882,13 @@ class AccountIn(BaseModel):
     allowed_roles: list[str] = []
     name: str = ""
     ua_user_id: str | None = None   # propojení s uživatelem z UniFi Access
+    see_all: bool = False           # operátor vidí všechny uživatele (i bez role)
 
 
 def _acc_public(a: dict) -> dict:
     return {"user": a["user"], "name": a.get("name", ""), "role": a.get("role"),
-            "allowed_roles": a.get("allowed_roles", []), "ua_user_id": a.get("ua_user_id")}
+            "allowed_roles": a.get("allowed_roles", []), "ua_user_id": a.get("ua_user_id"),
+            "see_all": bool(a.get("see_all"))}
 
 
 @app.get("/api/accounts")
@@ -903,12 +919,13 @@ async def accounts_save(a: AccountIn, who: str = Depends(admin)):
         if a.role == "operator" and not allowed:
             raise HTTPException(400, "Operátor musí mít povolenou alespoň jednu roli")
         cfg["accounts"].append({"user": user, "pw": hash_pw(a.password), "role": a.role,
-                                "allowed_roles": allowed, "name": a.name.strip(), "ua_user_id": a.ua_user_id})
+                                "allowed_roles": allowed, "name": a.name.strip(), "ua_user_id": a.ua_user_id,
+                                "see_all": a.see_all and a.role == "operator"})
         action = "account_create"
     else:
         if user == who and a.role != "admin":
             raise HTTPException(400, "Sami sobě nemůžete odebrat roli správce")
-        acc.update(role=a.role, allowed_roles=allowed, name=a.name.strip())
+        acc.update(role=a.role, allowed_roles=allowed, name=a.name.strip(), see_all=a.see_all and a.role == "operator")
         if a.ua_user_id:
             acc["ua_user_id"] = a.ua_user_id
         if a.password:
@@ -961,9 +978,11 @@ def norm_plate(p: str) -> str:
 
 @app.get("/api/users/{uid}")
 async def get_user(uid: str, who: str = Depends(auth)):
-    await check_scope(who, uid)
+    await check_scope(who, uid, write=False)
+    cfg = load_cfg()
     u = (await ua.request("GET", f"/users/{uid}", params={"expand[]": "access_policy"}))["data"]
     u["role_id"] = (await membership()).get(uid)
+    u["can_manage"] = can_manage(cfg, get_account(cfg, who), u["role_id"])
     return u
 
 
@@ -1200,7 +1219,7 @@ async def logs(hours: int = 24, user_id: str | None = None, who: str = Depends(a
     cfg = load_cfg()
     acc = get_account(cfg, who)
     if user_id:
-        await check_scope(who, user_id)
+        await check_scope(who, user_id, write=False)
     now = int(time.time())
     body = {"topic": "door_openings", "since": now - hours * 3600, "until": now}
     if user_id:
@@ -1215,7 +1234,7 @@ async def logs(hours: int = 24, user_id: str | None = None, who: str = Depends(a
         out.append({"time": h.get("@timestamp") or ev.get("published"), "user": actor.get("display_name"),
                     "user_id": actor.get("id"), "door": door, "result": ev.get("result"),
                     "method": (s.get("authentication") or {}).get("credential_provider")})
-    if acc.get("role") != "admin":
+    if acc.get("role") != "admin" and not acc.get("see_all"):
         m, allowed = await membership(), allowed_role_ids(cfg, acc)
         out = [x for x in out if m.get(x["user_id"]) in allowed]
     return out

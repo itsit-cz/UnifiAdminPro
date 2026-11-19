@@ -9,7 +9,8 @@ ke konzoli se připojuje přímo nebo přes **WireGuard VPN z UDM**, který bě�
 - **Role** – skupiny uživatelů z UniFi Access namapované jako role; přístup ke dveřím se řídí politikami skupiny,
   každý uživatel má právě jednu roli
 - **Účty aplikace** – *správce* (vše) a *operátor* (zakládá a spravuje jen uživatele v povolených rolích,
-  nemůže mazat, měnit nastavení ani číst audit)
+  nemůže mazat, měnit nastavení ani číst audit). Volba *Vidí všechny uživatele*: operátor vidí i uživatele bez role
+  a v cizích rolích; uživatele bez role může zařadit do svých rolí, ostatní jen prohlíží
 - **Detail uživatele** – úprava údajů, změna role, PIN (nastavit/odebrat),
   **NFC karty** (načtení přiložením ke čtečce, ruční token, přeřazení, odebrání), **SPZ** (přidat/odebrat, UA 3.3.10+)
 - **Průchody** – log otevření dveří (1 h – 30 dní), filtr dle uživatele
