@@ -65,6 +65,23 @@ OU studentů, tříd, vyřazených a zaměstnanců (*Načíst seznam OU*), **Ote
 do tunelu přesměrování `127.0.0.1:25347 → řadič:636`, takže AD ve škole je dostupné i z DC.
 Výchozí OU odpovídají dosavadnímu synchronizačnímu nástroji (`OU=Students,OU=Accounts,DC=vossp,DC=cze`).
 
+## Osoby a anomálie (interní databáze)
+
+SyncPro si v `/app/data/syncpro.db` (SQLite) vede **osoby**: jedna osoba může mít víc Edookit ID
+(chyba v evidenci) a víc studií (dva obory). Ukládají se jen vazby ID, jména, třídy a **otisk** rodného čísla
+(HMAC s klíčem z `/app/keys`) – rodné číslo samotné ani ostatní osobní údaje ne.
+
+Při každém načtení z Edookitu / porovnání s AD se vyhodnotí **anomálie** (Edookit → Anomálie):
+
+| Typ | Kdy | Řešení |
+|---|---|---|
+| Více Edookit ID | shoda otisku RČ (jistě) nebo jména (podezření) | Sloučit s volbou primárního ID (to patří do AD `edookitPersonID`), nebo „Nejde o stejnou osobu“; sloučení lze zpětně oddělit |
+| Více studií | student ve více třídách (vlastní třída + S skupina jiné třídy) | informace; hlavní studium = vyšší ročník (lze změnit). Do AD patří skupiny všech studií |
+| Sdílená karta | stejná karta u různých osob | vzít na vědomí |
+| AD bez Edookit ID / více účtů v AD | aktivní účty | vzít na vědomí |
+
+Anomálie, která z dat zmizí, se uzavře sama; rozhodnutí se zapisují do auditu.
+
 ## Role a účty
 1. V UniFi Access vytvořte skupiny uživatelů (např. Žáci, Učitelé) a přiřaďte jim přístupové politiky.
 2. Nastavení → **Role**: zaškrtněte skupiny, které se mají používat jako role, případně je přejmenujte.

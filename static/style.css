@@ -24,7 +24,7 @@
   .DEACTIVATED { background:#fde8e8; color:var(--red); }
   .PENDING { background:#fff4d6; color:var(--amber); }
   .mute { color:var(--mute); }
-  .stats { display:flex; gap:12px; margin-bottom:14px; }
+  .stats { display:flex; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
   .stat { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 16px; min-width:130px; }
   .stat b { display:block; font-size:22px; }
   dialog { border:0; border-radius:10px; padding:20px 22px; width:min(480px,95vw); box-shadow:0 10px 40px rgba(0,0,0,.2); }
