@@ -1,4 +1,4 @@
-# UnifiAdminPro
+# SyncPro
 Správa uživatelů v UNIFI Access a Unifi Protect
 
 Jednoduché webové rozhraní pro UniFi Access. Každá lokalita (škola) má **vlastní instanci** v Dockeru,
@@ -36,7 +36,7 @@ Více škol na jednom hostu = více stacků; v každém změňte levou stranu po
 1. **API token:** UniFi Access → Settings → General → API Token → Create New – zaškrtněte **všechna oprávnění**
    (minimálně view/edit pro User, Access Policy, Credential, Device, Location a System Log).
 2. **WireGuard klient:** UniFi Network → Settings → VPN → VPN Server → WireGuard → přidat klienta
-   (např. „UnifiAdminPro – DC“) → stáhnout `.conf` a nahrát ho v průvodci.
+   (např. „SyncPro – DC“) → stáhnout `.conf` a nahrát ho v průvodci.
    UDM musí být dostupné z internetu na portu WireGuard (veřejná IP, ne CGNAT).
 3. **Adresa konzole:** LAN IP konzole UniFi Access (u UDM jeho IP, např. `172.16.0.1`), port 12445.
 

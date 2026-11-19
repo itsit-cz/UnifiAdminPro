@@ -3,19 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UniFi Access – správa uživatelů</title>
+<title>SyncPro</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header>
-  <h1>🔐 UnifiAdminPro</h1>
+  <h1>🔐 SyncPro</h1>
   <nav>
     <button data-tab="users" class="on">Uživatelé</button>
     <button data-tab="logs">Průchody</button>
     <button data-tab="audit" class="admin-only">Audit změn</button>
     <button data-tab="settings">Nastavení</button>
   </nav>
-  <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="who" class="mute"></span><span id="ver" class="mute" style="font-size:12px"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
+  <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="uaok" class="badge"></span><span id="who" class="mute"></span><span id="ver" class="mute" style="font-size:12px"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
 </header>
 
 <main>
@@ -434,12 +434,15 @@ async function loadStatus() {
     $('#who').textContent = ST.user + (ST.account_role === 'admin' ? ' (správce)' : ' (operátor)');
     document.body.classList.toggle('operator', ST.account_role !== 'admin');
     const hs = ST.handshake_age, wgOk = ST.tunnel_up && hs !== null && hs < 300;
-    const ok = !ST.last_error && (!ST.wireguard || wgOk);
     $('#conn').textContent = ST.wireguard ? (wgOk ? 'WG tunel ✓' : (ST.tunnel_up ? 'WG bez handshaku' : 'WG neběží')) : 'přímé spojení';
     if (ST.wireguard) $('#conn').title = (ST.last_error ? ST.last_error + ' · ' : '') + (hs !== null ? `poslední handshake před ${hs} s` : 'handshake zatím neproběhl');
-    $('#conn').className = 'badge ' + (ok ? 'ACTIVE' : 'DEACTIVATED');
+    $('#conn').className = 'badge ' + (ST.wireguard ? (wgOk ? 'ACTIVE' : 'DEACTIVATED') : 'ACTIVE');
+    $('#uaok').textContent = ST.ua_ok ? 'UniFi ✓' : 'UniFi ✗';
+    $('#uaok').className = 'badge ' + (ST.ua_ok ? 'ACTIVE' : 'DEACTIVATED');
+    $('#uaok').title = ST.ua_ok ? `UniFi Access odpovídá (před ${ST.ua_ok_age} s)` : (ST.last_error || 'UniFi Access neodpovídá');
   });
 }
+setInterval(() => { if (!document.hidden) loadStatus(); }, 60000);
 async function logout() { await fetch('/api/logout', {method:'POST'}); location.href = '/login'; }
 function readConf(inp, target) { const f = inp.files[0]; if (f) f.text().then(t => $(target).value = t); }
 $('#sWgMode').onchange = () => { $('#sWgBox').classList.toggle('hidden', $('#sWgMode').value !== 'replace'); $('#sSave').disabled = true; };
