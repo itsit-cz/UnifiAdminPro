@@ -302,10 +302,11 @@ async function loadStatus() {
     ST = await api('GET', '/api/status');
     $('#site').textContent = ST.site_name || '';
     $('#who').textContent = ST.user;
-    const ok = !ST.last_error && (!ST.wireguard || ST.tunnel_up);
-    $('#conn').textContent = ST.wireguard ? (ST.tunnel_up ? 'WG tunel ✓' : 'WG tunel ✗') : 'přímé spojení';
+    const hs = ST.handshake_age, wgOk = ST.tunnel_up && hs !== null && hs < 300;
+    const ok = !ST.last_error && (!ST.wireguard || wgOk);
+    $('#conn').textContent = ST.wireguard ? (wgOk ? 'WG tunel ✓' : (ST.tunnel_up ? 'WG bez handshaku' : 'WG neběží')) : 'přímé spojení';
+    if (ST.wireguard) $('#conn').title = (ST.last_error ? ST.last_error + ' · ' : '') + (hs !== null ? `poslední handshake před ${hs} s` : 'handshake zatím neproběhl');
     $('#conn').className = 'badge ' + (ok ? 'ACTIVE' : 'DEACTIVATED');
-    $('#conn').title = ST.last_error || '';
   });
 }
 async function logout() { await fetch('/api/logout', {method:'POST'}); location.href = '/login'; }
@@ -325,7 +326,8 @@ async function sTest() {
     const r = await api('POST', '/api/settings/test', sBody());
     sCert = r.cert_sha256;
     $('#sSteps').innerHTML = r.steps.map(s => `<li>${s.ok ? '✅' : '❌'} ${esc(s.text)}</li>`).join('') +
-      (r.ok ? `<li>🔒 Otisk certifikátu: <span class="fp">${esc(sCert)}</span>${ST.cert_sha256 && ST.cert_sha256 !== sCert ? ' <b style="color:var(--red)">– liší se od uloženého!</b>' : ''}</li>` : '');
+      (r.ok ? `<li>🔒 Otisk certifikátu: <span class="fp">${esc(sCert)}</span>${ST.cert_sha256 && ST.cert_sha256 !== sCert ? ' <b style="color:var(--red)">– liší se od uloženého!</b>' : ''}</li>` : '') +
+      (r.wg_log ? `<li class="mute">Log WireGuard:<div class="fp">${esc(r.wg_log)}</div></li>` : '');
     $('#sSave').disabled = !r.ok;
   });
 }
