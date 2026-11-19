@@ -17,6 +17,11 @@ Backend (FastAPI) volá oficiální UniFi Access Developer API; API token zůst�
 2. `cp .env.example .env` a vyplnit `UA_HOST`, `UA_TOKEN`, `ADMIN_PASSWORD`.
 3. `docker compose up -d --build` → http://server:8080
 
+### Portainer
+*Stacks → Add stack → Repository*: URL `https://github.com/itsit-cz/UnifiAdminPro`, reference `refs/heads/main`,
+compose path `docker-compose.yml`. V *Environment variables* doplnit `UA_HOST`, `UA_TOKEN`, `ADMIN_PASSWORD`
+(volitelně `HOST_PORT`, `ADMIN_USER`, `UA_VERIFY_TLS`) a *Deploy the stack*.
+
 Bez Dockeru: `pip install -r requirements.txt` a `uvicorn app:app --host 0.0.0.0 --port 8080`
 (proměnné z `.env` exportovat do prostředí).
 
