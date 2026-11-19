@@ -223,7 +223,8 @@ async function api(method, url, body) {
 }
 function toast(msg, ok = true) {
   const t = $('#toast'); t.textContent = msg; t.style.background = ok ? 'var(--green)' : 'var(--red)';
-  t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 4000);
+  t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ok ? 4000 : 15000);
+  t.onclick = () => t.style.display = 'none';
 }
 async function run(fn, okMsg) {
   try { await fn(); if (okMsg) toast(okMsg); } catch (e) { toast(e.message, false); }

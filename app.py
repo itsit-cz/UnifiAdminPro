@@ -274,6 +274,14 @@ class UAClient:
             body = r.json()
         except ValueError:
             raise HTTPException(502, f"Neočekávaná odpověď ({r.status_code})")
+        code = body.get("code") if isinstance(body, dict) else None
+        if method != "GET" or code != "SUCCESS":
+            sent = kw.get("json")
+            sent = {k: ("***" if "pin" in k else v) for k, v in sent.items()} if isinstance(sent, dict) else sent
+            print(f"[ua] {method} {path} → HTTP {r.status_code} {code} {body.get('msg') if isinstance(body, dict) else ''}"
+                  f"{' | body=' + json.dumps(sent, ensure_ascii=False)[:300] if sent is not None else ''}"
+                  f"{' | data=' + json.dumps(body.get('data'), ensure_ascii=False)[:300] if method == 'POST' else ''}",
+                  flush=True)
         if not raise_on_code and r.status_code < 500:
             return body
         if r.status_code >= 400 or body.get("code") != "SUCCESS":
