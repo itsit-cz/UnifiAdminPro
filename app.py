@@ -347,7 +347,11 @@ def ad_tunnels(cfg: dict) -> list[tuple[int, str]]:
     """Přesměrování LDAP(S) na řadič domény ve škole přes WireGuard tunel."""
     ad = cfg.get("ad") or {}
     if ad.get("server") and cfg.get("wg_conf") and ad.get("via_tunnel", True):
-        return [(AD_TUNNEL_PORT, f"{ad['server']}:{ad.get('port') or (636 if ad.get('mode', 'ldaps') == 'ldaps' else 389)}")]
+        port = ad.get("port") or (636 if ad.get("mode", "ldaps") == "ldaps" else 389)
+        out = [(AD_TUNNEL_PORT, f"{ad['server']}:{port}")]
+        diag = 389 if port != 389 else 636          # druhý port jen pro diagnostiku (LDAP vs. LDAPS)
+        out.append((AD_TUNNEL_PORT + 1, f"{ad['server']}:{diag}"))
+        return out
     return []
 
 
@@ -1511,6 +1515,73 @@ async def ad_config_save(a: AdCfgIn, who: str = Depends(admin)):
     return {"ok": True, "tunnel_restarted": tunnels_changed}
 
 
+def ad_port_probe(host: str, port: int, tls: bool, timeout: float = 8) -> tuple[bool, str]:
+    """Zjistí, zda na portu odpovídá LDAP (bez TLS) nebo LDAPS (TLS handshake)."""
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except OSError as e:
+        return False, f"nelze se připojit ({e.strerror or e})"
+    try:
+        sock.settimeout(timeout)
+        if tls:
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname, ctx.verify_mode = False, _ssl.CERT_NONE
+            with ctx.wrap_socket(sock) as ss:
+                cert = ss.getpeercert(binary_form=True)
+                return True, f"LDAPS odpovídá (TLS {ss.version()}, certifikát {len(cert or b'')} B)"
+        # LDAP rootDSE: anonymní search request (BER), stačí jakákoli odpověď
+        req = bytes.fromhex("3025020101632004000a01000a0100020100020100010100870b6f626a656374636c6173733000")
+        sock.sendall(req)
+        data = sock.recv(64)
+        return (True, "LDAP odpovídá") if data[:1] == b"\x30" else (False, "spojení navázáno, ale nepřišla odpověď LDAP")
+    except _ssl.SSLError as e:
+        return False, f"TLS handshake selhal ({e.reason or e}) – port pravděpodobně nemá LDAPS"
+    except (ConnectionResetError, BrokenPipeError):
+        return False, "spojení ukončeno – cíl odmítl spojení nebo je nedostupný"
+    except socket.timeout:
+        return False, "žádná odpověď (timeout)"
+    except OSError as e:
+        return False, f"chyba: {e}"
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def ad_diagnose(c: dict) -> list[dict]:
+    steps = []
+    cfg = load_cfg() or {}
+    tun = ad_tunnels(cfg)
+    server = c.get("server")
+    if tun:
+        if not ua.tunnel.running:
+            return [{"ok": False, "text": "WireGuard tunel neběží – zkontrolujte připojení v Nastavení"}]
+        for (lport, target) in tun:
+            port = int(target.rsplit(":", 1)[1])
+            ok, msg = ad_port_probe("127.0.0.1", lport, tls=(port == 636))
+            steps.append({"ok": ok, "text": f"{target} přes tunel: {msg}"})
+        log = [l for l in ua.tunnel.log if server in l and "TCP Client Tunnel" in l][-4:]
+        for l in log:
+            port = l.split(server + ":", 1)[-1].split(":", 1)[0]
+            why = ("řadič spojení odmítl – na tomto portu nic neposlouchá" if "refused" in l else
+                   "řadič neodpovídá – IP neexistuje nebo spojení blokuje firewall" if ("timeout" in l or "timed out" in l
+                                                                                     or "unreachable" in l or "no route" in l) else l)
+            steps.append({"ok": False, "text": f"WireGuard klient → {server}:{port}: {why}"})
+    else:
+        port = c.get("port") or (636 if c.get("mode", "ldaps") == "ldaps" else 389)
+        ok, msg = ad_port_probe(server, port, tls=(c.get("mode", "ldaps") == "ldaps"))
+        steps.append({"ok": ok, "text": f"{server}:{port}: {msg}"})
+    states = {int(x["text"].split(":")[1].split(" ")[0]): x["ok"] for x in steps if x["ok"] is not None and ":" in x["text"]}
+    if states.get(636) is False and states.get(389):
+        steps.append({"ok": None, "text": "👉 Řadič odpovídá na 389, ale ne na 636: nemá LDAPS certifikát. Přepněte Zabezpečení na "
+                                          "StartTLS (389); pokud ani to nepůjde, je potřeba řadiči vystavit certifikát (AD CS)."})
+    elif states and not any(states.values()):
+        steps.append({"ok": None, "text": "👉 Řadič neodpovídá na žádném portu: ověřte IP adresu a že firewall UDM pouští VPN "
+                                          "klienty do sítě řadiče (TCP 389/636)."})
+    return steps
+
+
 @app.post("/api/ad/test")
 async def ad_test(_: str = Depends(admin)):
     c = ad_cfg()
@@ -1540,9 +1611,8 @@ async def ad_test(_: str = Depends(admin)):
     try:
         steps = await asyncio.to_thread(run_test)
     except HTTPException as e:
-        tun = ad_tunnels(load_cfg() or {})
-        return {"ok": False, "steps": [{"ok": False, "text": e.detail +
-                (" – ověřte IP řadiče a že VPN klienti na UDM smí na jeho port" if tun else "")}]}
+        diag = await asyncio.to_thread(ad_diagnose, c)
+        return {"ok": False, "steps": [{"ok": False, "text": e.detail}] + diag}
     return {"ok": all(x["ok"] is not False for x in steps), "steps": steps}
 
 
