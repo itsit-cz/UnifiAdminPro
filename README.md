@@ -6,7 +6,11 @@ ke konzoli se připojuje přímo nebo přes **WireGuard VPN z UDM**, který bě�
 
 ## Funkce
 - **Uživatelé** – seznam, hledání (i podle SPZ a karty), filtry, přidání, deaktivace/aktivace, trvalé smazání
-- **Detail uživatele** – úprava údajů, přístupové politiky, PIN (nastavit/odebrat),
+- **Role** – skupiny uživatelů z UniFi Access namapované jako role; přístup ke dveřím se řídí politikami skupiny,
+  každý uživatel má právě jednu roli
+- **Účty aplikace** – *správce* (vše) a *operátor* (zakládá a spravuje jen uživatele v povolených rolích,
+  nemůže mazat, měnit nastavení ani číst audit)
+- **Detail uživatele** – úprava údajů, změna role, PIN (nastavit/odebrat),
   **NFC karty** (načtení přiložením ke čtečce, ruční token, přeřazení, odebrání), **SPZ** (přidat/odebrat, UA 3.3.10+)
 - **Průchody** – log otevření dveří (1 h – 30 dní), filtr dle uživatele
 - **Audit změn** – kdo a kdy co změnil přes rozhraní
@@ -34,6 +38,13 @@ Více škol na jednom hostu = více stacků; v každém změňte levou stranu po
    (např. „UnifiAdminPro – DC“) → stáhnout `.conf` a nahrát ho v průvodci.
    UDM musí být dostupné z internetu na portu WireGuard (veřejná IP, ne CGNAT).
 3. **Adresa konzole:** LAN IP konzole UniFi Access (u UDM jeho IP, např. `172.16.0.1`), port 12445.
+
+## Role a účty
+1. V UniFi Access vytvořte skupiny uživatelů (např. Žáci, Učitelé) a přiřaďte jim přístupové politiky.
+2. Nastavení → **Role**: zaškrtněte skupiny, které se mají používat jako role, případně je přejmenujte.
+3. Nastavení → **Účty aplikace**: založte operátory (např. sekretariát) a vyberte, v jakých rolích smí pracovat.
+
+Členství v roli se čte ze skupin v UniFi Access – změny provedené přímo v Access se v aplikaci projeví.
 
 ## Aktualizace z webu
 Nastavení → Aktualizace → způsob:

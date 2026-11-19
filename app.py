@@ -58,7 +58,27 @@ dec = lambda s: fernet.decrypt(s.encode()).decode() if s else None
 
 # ---------------------------------------------------------------- konfigurace
 def load_cfg() -> dict | None:
-    return json.loads(CONFIG.read_text()) if CONFIG.exists() else None
+    if not CONFIG.exists():
+        return None
+    cfg = json.loads(CONFIG.read_text())
+    if "admin" in cfg and "accounts" not in cfg:      # migrace z verze s jedním správcem
+        cfg["accounts"] = [{**cfg.pop("admin"), "role": "admin", "allowed_roles": []}]
+        save_cfg(cfg)
+    return cfg
+
+
+def get_account(cfg: dict | None, user: str | None) -> dict | None:
+    return next((a for a in (cfg or {}).get("accounts", []) if a["user"] == user), None)
+
+
+def mapped_roles(cfg: dict) -> list[dict]:
+    """Role = skupiny z UniFi Access, které správce označil v Nastavení: [{group_id, name}]."""
+    return cfg.get("roles", [])
+
+
+def allowed_role_ids(cfg: dict, acc: dict) -> set[str]:
+    ids = {r["group_id"] for r in mapped_roles(cfg)}
+    return ids if acc.get("role") == "admin" else ids & set(acc.get("allowed_roles", []))
 
 
 def save_cfg(cfg: dict):
@@ -336,12 +356,55 @@ async def _shutdown():
 
 
 def auth(request: Request) -> str:
-    if not load_cfg():
+    cfg = load_cfg()
+    if not cfg:
         raise HTTPException(409, "Aplikace ještě není nainstalována")
     user = request.session.get("user")
-    if not user:
+    if not user or not get_account(cfg, user):
+        request.session.clear()
         raise HTTPException(401, "Nepřihlášen")
     return user
+
+
+def admin(who: str = Depends(auth)) -> str:
+    if get_account(load_cfg(), who).get("role") != "admin":
+        raise HTTPException(403, "Tuto akci smí provést jen správce")
+    return who
+
+
+# ---------------------------------------------------------------- členství v rolích (skupinách)
+_members: dict = {"t": 0.0, "map": {}}
+
+
+async def membership(force: bool = False) -> dict[str, str]:
+    """user_id -> group_id pro namapované role (přímí členové skupin), cache 30 s."""
+    if not force and time.time() - _members["t"] < 30:
+        return _members["map"]
+    m = {}
+    for r in mapped_roles(load_cfg() or {}):
+        try:
+            data = (await ua.request("GET", f"/user_groups/{r['group_id']}/users"))["data"] or []
+        except HTTPException as e:
+            print(f"[roles] skupinu {r['name']} nelze načíst: {e.detail}", flush=True)
+            continue
+        for u in data:
+            m.setdefault(u.get("id"), r["group_id"])
+    _members.update(t=time.time(), map=m)
+    return m
+
+
+def invalidate_members():
+    _members["t"] = 0.0
+
+
+async def check_scope(who: str, uid: str):
+    """Operátor smí pracovat jen s uživateli ve svých rolích."""
+    cfg = load_cfg()
+    acc = get_account(cfg, who)
+    if acc.get("role") == "admin":
+        return
+    if (await membership()).get(uid) not in allowed_role_ids(cfg, acc):
+        raise HTTPException(403, "Tento uživatel nepatří do vašich rolí")
 
 
 FAILS: dict[str, list[float]] = {}
@@ -514,8 +577,10 @@ async def setup_complete(s: SetupIn, request: Request):
     if len(s.admin_password) < 10:
         raise HTTPException(400, "Heslo musí mít alespoň 10 znaků")
     host, token, wg = resolve_conn(s, None)
-    save_cfg({"site_name": s.site_name.strip(), "admin": {"user": s.admin_user.strip(),
-              "pw": hash_pw(s.admin_password)}, "ua_host": host, "ua_token": enc(token),
+    save_cfg({"site_name": s.site_name.strip(),
+              "accounts": [{"user": s.admin_user.strip(), "pw": hash_pw(s.admin_password), "role": "admin",
+                            "allowed_roles": []}],
+              "roles": [], "ua_host": host, "ua_token": enc(token),
               "wg_conf": enc(wg), "cert_sha256": s.cert_sha256 or None,
               "installed": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     SETUP_CODE = None
@@ -535,12 +600,11 @@ class LoginIn(BaseModel):
 async def login(li: LoginIn, request: Request):
     ip = request.client.host
     throttle(ip)
-    cfg = load_cfg() or {}
-    adm = cfg.get("admin", {})
-    if li.user != adm.get("user") or not check_pw(li.password, adm.get("pw", "x$00$00")):
+    acc = get_account(load_cfg(), li.user.strip()) or {}
+    if not check_pw(li.password, acc.get("pw", "x$00$00")):
         FAILS.setdefault(ip, []).append(time.time())
         raise HTTPException(401, "Neplatné jméno nebo heslo")
-    request.session["user"] = li.user
+    request.session["user"] = acc["user"]
     return {"ok": True}
 
 
@@ -554,8 +618,14 @@ async def logout(request: Request):
 @app.get("/api/status")
 async def status(who: str = Depends(auth)):
     cfg = load_cfg()
+    acc = get_account(cfg, who)
     wg = dec(cfg.get("wg_conf"))
-    return {"user": who, "site_name": cfg.get("site_name"), "ua_host": cfg.get("ua_host"),
+    base = {"user": who, "account_role": acc.get("role"), "site_name": cfg.get("site_name"),
+            "roles": [r for r in mapped_roles(cfg) if r["group_id"] in allowed_role_ids(cfg, acc)]}
+    if acc.get("role") != "admin":
+        return {**base, "wireguard": bool(wg), "tunnel_up": ua.tunnel.running,
+                **(ua.tunnel.stats() if wg else {}), "last_error": ua.last_error}
+    return {**base, "ua_host": cfg.get("ua_host"),
             "wireguard": bool(wg), "wg_endpoint": wg_endpoint(wg), "tunnel_up": ua.tunnel.running,
             **(ua.tunnel.stats() if wg else {}),
             "cert_sha256": cfg.get("cert_sha256"), "last_error": ua.last_error}
@@ -566,12 +636,12 @@ class SaveConnIn(ConnIn):
 
 
 @app.post("/api/settings/test")
-async def settings_test(c: ConnIn, who: str = Depends(auth)):
+async def settings_test(c: ConnIn, who: str = Depends(admin)):
     return await test_conn(*resolve_conn(c, load_cfg()))
 
 
 @app.post("/api/settings/connection")
-async def settings_save(c: SaveConnIn, who: str = Depends(auth)):
+async def settings_save(c: SaveConnIn, who: str = Depends(admin)):
     cfg = load_cfg()
     host, token, wg = resolve_conn(c, cfg)
     cfg.update(ua_host=host, ua_token=enc(token), wg_conf=enc(wg), cert_sha256=c.cert_sha256 or None)
@@ -589,11 +659,12 @@ class PwIn(BaseModel):
 @app.post("/api/settings/password")
 async def settings_pw(p: PwIn, who: str = Depends(auth)):
     cfg = load_cfg()
-    if not check_pw(p.old, cfg["admin"]["pw"]):
+    acc = get_account(cfg, who)
+    if not check_pw(p.old, acc["pw"]):
         raise HTTPException(400, "Původní heslo nesouhlasí")
     if len(p.new) < 10:
         raise HTTPException(400, "Heslo musí mít alespoň 10 znaků")
-    cfg["admin"]["pw"] = hash_pw(p.new)
+    acc["pw"] = hash_pw(p.new)
     save_cfg(cfg)
     audit(who, "password", {})
     return {"ok": True}
@@ -605,8 +676,12 @@ class NewUser(BaseModel):
     last_name: str
     user_email: str | None = None
     employee_number: str | None = None
-    access_policy_ids: list[str] = []
+    role_id: str | None = None
     pin_code: str | None = None
+
+
+class RoleIn(BaseModel):
+    role_id: str
 
 
 class StatusIn(BaseModel):
@@ -622,8 +697,17 @@ class PinIn(BaseModel):
 
 
 @app.get("/api/users")
-async def users(_: str = Depends(auth)):
-    return await ua.all_pages("/users", {"expand[]": "access_policy"})
+async def users(who: str = Depends(auth)):
+    cfg = load_cfg()
+    acc = get_account(cfg, who)
+    allowed = allowed_role_ids(cfg, acc)
+    m = await membership(force=True)
+    out = []
+    for u in await ua.all_pages("/users", {"expand[]": "access_policy"}):
+        u["role_id"] = m.get(u.get("id"))
+        if acc.get("role") == "admin" or u["role_id"] in allowed:
+            out.append(u)
+    return out
 
 
 @app.get("/api/policies")
@@ -633,25 +717,55 @@ async def policies(_: str = Depends(auth)):
 
 @app.post("/api/users")
 async def create_user(u: NewUser, who: str = Depends(auth)):
+    cfg = load_cfg()
+    acc = get_account(cfg, who)
     if u.pin_code and (not u.pin_code.isdigit() or not 4 <= len(u.pin_code) <= 8):
         raise HTTPException(400, "PIN musí mít 4–8 číslic")
+    if mapped_roles(cfg) or acc.get("role") != "admin":
+        if not u.role_id:
+            raise HTTPException(400, "Vyberte roli")
+        if u.role_id not in allowed_role_ids(cfg, acc):
+            raise HTTPException(403, "Do této role nemůžete zakládat uživatele")
     body = {k: v for k, v in u.model_dump(include={"first_name", "last_name", "user_email",
                                                     "employee_number"}).items() if v}
     body["onboard_time"] = int(time.time())
     created = (await ua.request("POST", "/users", json=body))["data"]
     uid = created["id"]
-    if u.access_policy_ids:
-        await ua.request("PUT", f"/users/{uid}/access_policies",
-                         json={"access_policy_ids": u.access_policy_ids})
+    if u.role_id:
+        await ua.request("POST", f"/user_groups/{u.role_id}/users", json=[uid])
+        invalidate_members()
     if u.pin_code:
         await ua.request("PUT", f"/users/{uid}/pin_codes", json={"pin_code": u.pin_code})
     audit(who, "create", {"user_id": uid, "name": f"{u.first_name} {u.last_name}",
-                          "policies": u.access_policy_ids, "pin": bool(u.pin_code)})
+                          "role": role_name(cfg, u.role_id), "pin": bool(u.pin_code)})
     return created
+
+
+def role_name(cfg: dict, gid: str | None) -> str | None:
+    return next((r["name"] for r in mapped_roles(cfg) if r["group_id"] == gid), gid)
+
+
+@app.put("/api/users/{uid}/role")
+async def set_role(uid: str, r: RoleIn, who: str = Depends(auth)):
+    cfg = load_cfg()
+    acc = get_account(cfg, who)
+    await check_scope(who, uid)
+    if r.role_id not in allowed_role_ids(cfg, acc):
+        raise HTTPException(403, "Do této role nemůžete uživatele přesunout")
+    old = (await membership(force=True)).get(uid)
+    if old == r.role_id:
+        return {"ok": True}
+    await ua.request("POST", f"/user_groups/{r.role_id}/users", json=[uid])
+    if old:
+        await ua.request("POST", f"/user_groups/{old}/users/delete", json=[uid])
+    invalidate_members()
+    audit(who, "role", {"user_id": uid, "from": role_name(cfg, old), "to": role_name(cfg, r.role_id)})
+    return {"ok": True}
 
 
 @app.put("/api/users/{uid}/status")
 async def set_status(uid: str, s: StatusIn, who: str = Depends(auth)):
+    await check_scope(who, uid)
     if s.status not in ("ACTIVE", "DEACTIVATED"):
         raise HTTPException(400, "Status musí být ACTIVE nebo DEACTIVATED")
     await ua.request("PUT", f"/users/{uid}", json={"status": s.status})
@@ -660,7 +774,7 @@ async def set_status(uid: str, s: StatusIn, who: str = Depends(auth)):
 
 
 @app.put("/api/users/{uid}/policies")
-async def set_policies(uid: str, p: PoliciesIn, who: str = Depends(auth)):
+async def set_policies(uid: str, p: PoliciesIn, who: str = Depends(admin)):
     await ua.request("PUT", f"/users/{uid}/access_policies",
                      json={"access_policy_ids": p.access_policy_ids})
     audit(who, "policies", {"user_id": uid, "policies": p.access_policy_ids})
@@ -669,6 +783,7 @@ async def set_policies(uid: str, p: PoliciesIn, who: str = Depends(auth)):
 
 @app.put("/api/users/{uid}/pin")
 async def set_pin(uid: str, p: PinIn, who: str = Depends(auth)):
+    await check_scope(who, uid)
     if not p.pin_code.isdigit() or not 4 <= len(p.pin_code) <= 8:
         raise HTTPException(400, "PIN musí mít 4–8 číslic")
     await ua.request("PUT", f"/users/{uid}/pin_codes", json={"pin_code": p.pin_code})
@@ -677,12 +792,131 @@ async def set_pin(uid: str, p: PinIn, who: str = Depends(auth)):
 
 
 @app.delete("/api/users/{uid}")
-async def delete_user(uid: str, who: str = Depends(auth)):
+async def delete_user(uid: str, who: str = Depends(admin)):
     await ua.request("PUT", f"/users/{uid}", json={"status": "DEACTIVATED"})
     await ua.request("DELETE", f"/users/{uid}")
+    invalidate_members()
     audit(who, "delete", {"user_id": uid})
     return {"ok": True}
 
+
+
+
+# ---------------------------------------------------------------- role (mapování skupin)
+class RoleMapIn(BaseModel):
+    group_id: str
+    name: str
+
+
+@app.get("/api/groups")
+async def groups(_: str = Depends(admin)):
+    """Všechny skupiny z UniFi Access + zda jsou namapované jako role + jejich politiky."""
+    cfg = load_cfg()
+    mapped = {r["group_id"]: r["name"] for r in mapped_roles(cfg)}
+    data = (await ua.request("GET", "/user_groups"))["data"] or []
+    out = []
+    for g in data:
+        try:
+            pol = (await ua.request("GET", f"/user_groups/{g['id']}/access_policies"))["data"] or []
+        except HTTPException:
+            pol = []
+        out.append({"id": g["id"], "name": g.get("full_name") or g.get("name"), "role": g["id"] in mapped,
+                    "role_name": mapped.get(g["id"]) or g.get("name"), "policies": [x.get("name") for x in pol]})
+    return out
+
+
+@app.get("/api/roles")
+async def roles(who: str = Depends(auth)):
+    cfg = load_cfg()
+    acc = get_account(cfg, who)
+    out = []
+    for r in mapped_roles(cfg):
+        if r["group_id"] not in allowed_role_ids(cfg, acc):
+            continue
+        try:
+            pol = (await ua.request("GET", f"/user_groups/{r['group_id']}/access_policies"))["data"] or []
+        except HTTPException:
+            pol = []
+        out.append({**r, "policies": [x.get("name") for x in pol]})
+    return out
+
+
+@app.put("/api/roles")
+async def roles_save(items: list[RoleMapIn], who: str = Depends(admin)):
+    cfg = load_cfg()
+    cfg["roles"] = [{"group_id": i.group_id, "name": i.name.strip() or i.group_id} for i in items]
+    ids = {i.group_id for i in items}
+    for a in cfg["accounts"]:               # odebrat operátorům zrušené role
+        a["allowed_roles"] = [x for x in a.get("allowed_roles", []) if x in ids]
+    save_cfg(cfg)
+    invalidate_members()
+    audit(who, "roles", {"roles": ", ".join(r["name"] for r in cfg["roles"])})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- účty aplikace
+class AccountIn(BaseModel):
+    user: str
+    password: str = ""
+    role: str = "operator"          # admin | operator
+    allowed_roles: list[str] = []
+    name: str = ""
+
+
+def _acc_public(a: dict) -> dict:
+    return {"user": a["user"], "name": a.get("name", ""), "role": a.get("role"),
+            "allowed_roles": a.get("allowed_roles", [])}
+
+
+@app.get("/api/accounts")
+async def accounts_list(_: str = Depends(admin)):
+    return [_acc_public(a) for a in load_cfg()["accounts"]]
+
+
+@app.post("/api/accounts")
+async def accounts_save(a: AccountIn, who: str = Depends(admin)):
+    cfg = load_cfg()
+    user = a.user.strip()
+    if not user or any(ch.isspace() for ch in user):
+        raise HTTPException(400, "Neplatné uživatelské jméno")
+    if a.role not in ("admin", "operator"):
+        raise HTTPException(400, "Neplatná role účtu")
+    ids = {r["group_id"] for r in mapped_roles(cfg)}
+    allowed = [x for x in a.allowed_roles if x in ids]
+    acc = get_account(cfg, user)
+    if a.password and len(a.password) < 10:
+        raise HTTPException(400, "Heslo musí mít alespoň 10 znaků")
+    if acc is None:
+        if not a.password:
+            raise HTTPException(400, "Zadejte heslo nového účtu")
+        if a.role == "operator" and not allowed:
+            raise HTTPException(400, "Operátor musí mít povolenou alespoň jednu roli")
+        cfg["accounts"].append({"user": user, "pw": hash_pw(a.password), "role": a.role,
+                                "allowed_roles": allowed, "name": a.name.strip()})
+        action = "account_create"
+    else:
+        if user == who and a.role != "admin":
+            raise HTTPException(400, "Sami sobě nemůžete odebrat roli správce")
+        acc.update(role=a.role, allowed_roles=allowed, name=a.name.strip())
+        if a.password:
+            acc["pw"] = hash_pw(a.password)
+        action = "account_edit"
+    save_cfg(cfg)
+    audit(who, action, {"account": user, "role": a.role, "password_changed": bool(a.password)})
+    return {"ok": True}
+
+
+@app.delete("/api/accounts/{user}")
+async def accounts_delete(user: str, who: str = Depends(admin)):
+    cfg = load_cfg()
+    if user == who:
+        raise HTTPException(400, "Nemůžete smazat vlastní účet")
+    if not get_account(cfg, user):
+        raise HTTPException(404, "Účet neexistuje")
+    cfg["accounts"] = [a for a in cfg["accounts"] if a["user"] != user]
+    save_cfg(cfg)
+    audit(who, "account_delete", {"account": user})
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- detail a úprava uživatele
@@ -712,12 +946,16 @@ def norm_plate(p: str) -> str:
 
 
 @app.get("/api/users/{uid}")
-async def get_user(uid: str, _: str = Depends(auth)):
-    return (await ua.request("GET", f"/users/{uid}", params={"expand[]": "access_policy"}))["data"]
+async def get_user(uid: str, who: str = Depends(auth)):
+    await check_scope(who, uid)
+    u = (await ua.request("GET", f"/users/{uid}", params={"expand[]": "access_policy"}))["data"]
+    u["role_id"] = (await membership()).get(uid)
+    return u
 
 
 @app.put("/api/users/{uid}")
 async def edit_user(uid: str, u: UserEditIn, who: str = Depends(auth)):
+    await check_scope(who, uid)
     if not u.first_name.strip() or not u.last_name.strip():
         raise HTTPException(400, "Jméno a příjmení jsou povinné")
     body = {"first_name": u.first_name.strip(), "last_name": u.last_name.strip(),
@@ -729,6 +967,7 @@ async def edit_user(uid: str, u: UserEditIn, who: str = Depends(auth)):
 
 @app.delete("/api/users/{uid}/pin")
 async def remove_pin(uid: str, who: str = Depends(auth)):
+    await check_scope(who, uid)
     await ua.request("DELETE", f"/users/{uid}/pin_codes")
     audit(who, "pin_remove", {"user_id": uid})
     return {"ok": True}
@@ -736,6 +975,7 @@ async def remove_pin(uid: str, who: str = Depends(auth)):
 
 @app.put("/api/users/{uid}/cards")
 async def add_card(uid: str, c: CardIn, who: str = Depends(auth)):
+    await check_scope(who, uid)
     token = c.token.strip()
     if not token:
         raise HTTPException(400, "Chybí token karty")
@@ -746,6 +986,7 @@ async def add_card(uid: str, c: CardIn, who: str = Depends(auth)):
 
 @app.post("/api/users/{uid}/cards/remove")
 async def remove_card(uid: str, c: CardIn, who: str = Depends(auth)):
+    await check_scope(who, uid)
     await ua.request("PUT", f"/users/{uid}/nfc_cards/delete", json={"token": c.token})
     audit(who, "card_remove", {"user_id": uid, "card": c.token[-6:]})
     return {"ok": True}
@@ -753,6 +994,7 @@ async def remove_card(uid: str, c: CardIn, who: str = Depends(auth)):
 
 @app.post("/api/users/{uid}/plates")
 async def add_plate(uid: str, p: PlateIn, who: str = Depends(auth)):
+    await check_scope(who, uid)
     plate = norm_plate(p.plate)
     if not 2 <= len(plate) <= 12:
         raise HTTPException(400, "Neplatná SPZ")
@@ -764,6 +1006,7 @@ async def add_plate(uid: str, p: PlateIn, who: str = Depends(auth)):
 
 @app.delete("/api/users/{uid}/plates/{pid}")
 async def remove_plate(uid: str, pid: str, plate: str = "", who: str = Depends(auth)):
+    await check_scope(who, uid)
     await ua.request("DELETE", f"/users/{uid}/license_plates/{pid}")
     audit(who, "plate_remove", {"user_id": uid, "plate": plate or pid})
     return {"ok": True}
@@ -871,14 +1114,14 @@ async def portainer_stack(url: str, token: str, sid: int) -> dict:
 
 
 @app.get("/api/update/config")
-async def updater_get(_: str = Depends(auth)):
+async def updater_get(_: str = Depends(admin)):
     u = (load_cfg() or {}).get("updater") or {}
     return {"method": u.get("method", "none"), "url": u.get("url", ""), "stack_id": u.get("stack_id"),
             "has_token": bool(u.get("token")), "has_webhook": bool(u.get("webhook"))}
 
 
 @app.post("/api/update/config")
-async def updater_save(u: UpdaterIn, who: str = Depends(auth)):
+async def updater_save(u: UpdaterIn, who: str = Depends(admin)):
     cfg = load_cfg()
     old = cfg.get("updater") or {}
     if u.method == "portainer":
@@ -927,7 +1170,7 @@ async def _do_update(u: dict):
 
 
 @app.post("/api/update/run")
-async def update_run(who: str = Depends(auth)):
+async def update_run(who: str = Depends(admin)):
     u = (load_cfg() or {}).get("updater") or {}
     if u.get("method") not in ("portainer", "webhook"):
         raise HTTPException(400, "Aktualizace z webu není nastavena")
@@ -937,7 +1180,11 @@ async def update_run(who: str = Depends(auth)):
 
 
 @app.get("/api/logs")
-async def logs(hours: int = 24, user_id: str | None = None, _: str = Depends(auth)):
+async def logs(hours: int = 24, user_id: str | None = None, who: str = Depends(auth)):
+    cfg = load_cfg()
+    acc = get_account(cfg, who)
+    if user_id:
+        await check_scope(who, user_id)
     now = int(time.time())
     body = {"topic": "door_openings", "since": now - hours * 3600, "until": now}
     if user_id:
@@ -952,11 +1199,14 @@ async def logs(hours: int = 24, user_id: str | None = None, _: str = Depends(aut
         out.append({"time": h.get("@timestamp") or ev.get("published"), "user": actor.get("display_name"),
                     "user_id": actor.get("id"), "door": door, "result": ev.get("result"),
                     "method": (s.get("authentication") or {}).get("credential_provider")})
+    if acc.get("role") != "admin":
+        m, allowed = await membership(), allowed_role_ids(cfg, acc)
+        out = [x for x in out if m.get(x["user_id"]) in allowed]
     return out
 
 
 @app.get("/api/audit")
-async def audit_log(limit: int = 200, _: str = Depends(auth)):
+async def audit_log(limit: int = 200, _: str = Depends(admin)):
     if not AUDIT_FILE.exists():
         return []
     lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()[-limit:]
