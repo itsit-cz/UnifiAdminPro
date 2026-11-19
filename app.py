@@ -1771,6 +1771,17 @@ def _norm(v) -> str:
     return " ".join(str(v or "").split()).casefold()
 
 
+def _name_parts(v) -> list[str]:
+    return [x for x in re.split(r"[\s\-–]+", _norm(v)) if x]
+
+
+def name_match(ek_val, ad_val) -> bool:
+    """Složená jména: AD obsahuje jen první část (nebo prvních několik) jména/příjmení z Edookitu
+    – 'Amélie Anita' ↔ 'Amélie', 'Bobčíková Pechová' ↔ 'Bobčíková'. Pomlčka = mezera."""
+    e, a = _name_parts(ek_val), _name_parts(ad_val)
+    return bool(a) and a == e[:len(a)] if e != a else True
+
+
 def _card(v) -> str:
     return str(v or "").strip().upper()
 
@@ -1788,7 +1799,8 @@ async def compare_ek_ad(refresh: bool = False, _: str = Depends(admin)):
             by_id.setdefault(str(a["edookit_id"]).strip(), []).append(a)
     by_name = {}
     for a in ad_rows:
-        by_name.setdefault((_norm(a.get("first_name")), _norm(a.get("last_name"))), []).append(a)
+        fp, lp = _name_parts(a.get("first_name")), _name_parts(a.get("last_name"))
+        by_name.setdefault((fp[0] if fp else "", lp[0] if lp else ""), []).append(a)
     used, out = set(), []
 
     def pick(cands):
@@ -1803,8 +1815,10 @@ async def compare_ek_ad(refresh: bool = False, _: str = Depends(admin)):
     for e in ek_rows:
         how, a = "id", pick(by_id.get(str(e["id"]), []))
         if not a:
-            cands = [c for c in by_name.get((_norm(e.get("first_name")), _norm(e.get("last_name"))), [])
-                     if not c.get("edookit_id")]
+            fp, lp = _name_parts(e.get("first_name")), _name_parts(e.get("last_name"))
+            cands = [c for c in by_name.get((fp[0] if fp else "", lp[0] if lp else ""), [])
+                     if not c.get("edookit_id") and name_match(e.get("first_name"), c.get("first_name"))
+                     and name_match(e.get("last_name"), c.get("last_name"))]
             if len(cands) == 1:
                 how, a = "jméno", pick(cands)
         if a:
@@ -1820,7 +1834,7 @@ async def compare_ek_ad(refresh: bool = False, _: str = Depends(admin)):
         ad_active = bool(a) and a["enabled"] and not a.get("excluded_ou")
         diffs = []
         if e and a:
-            if (_norm(e.get("first_name")), _norm(e.get("last_name"))) != (_norm(a.get("first_name")), _norm(a.get("last_name"))):
+            if not (name_match(e.get("first_name"), a.get("first_name")) and name_match(e.get("last_name"), a.get("last_name"))):
                 diffs.append("jméno")
             ad_cls = [x.strip() for x in (a.get("class") or "").split(",") if x.strip()]
             if ek_active and e.get("schedule_group") and e["schedule_group"].casefold() not in [x.casefold() for x in ad_cls]:
