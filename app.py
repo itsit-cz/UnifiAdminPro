@@ -1,5 +1,5 @@
 """
-UnifiAdminPro – správa uživatelů UniFi Access
+SyncPro – správa uživatelů UniFi Access
 Jedna instance = jedna lokalita (škola). Vše se nastavuje v průvodci instalací
 v prohlížeči: účet správce, adresa konzole, API token, volitelně WireGuard (wireproxy).
 """
@@ -103,7 +103,7 @@ def check_pw(pw: str, stored: str) -> bool:
 SETUP_CODE = None
 if not load_cfg():
     SETUP_CODE = f"{secrets.randbelow(10**6):06d}"
-    print("=" * 60 + f"\n  UnifiAdminPro – INSTALAČNÍ KÓD: {SETUP_CODE}\n"
+    print("=" * 60 + f"\n  SyncPro – INSTALAČNÍ KÓD: {SETUP_CODE}\n"
           "  Otevřete aplikaci v prohlížeči a zadejte tento kód.\n" + "=" * 60, flush=True)
 
 
@@ -246,6 +246,7 @@ class UAClient:
         self.client: httpx.AsyncClient | None = None
         self.pin: str | None = None
         self.last_error: str | None = None
+        self.last_ok: float = 0.0
 
     async def configure(self, host: str, token: str, wg_text: str | None, pin: str | None):
         await self.close()
@@ -317,6 +318,7 @@ class UAClient:
                         "view:device). Vytvořte v Access nový token se všemi oprávněními.")
             raise HTTPException(r.status_code if r.status_code >= 400 else 400, msg)
         self.last_error = None
+        self.last_ok = time.time()
         return body
 
     async def all_pages(self, path: str, params: dict | None = None):
@@ -346,7 +348,7 @@ async def apply_saved():
 
 
 # ---------------------------------------------------------------- aplikace + auth
-app = FastAPI(title="UnifiAdminPro", docs_url=None, redoc_url=None)
+app = FastAPI(title="SyncPro", docs_url=None, redoc_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, max_age=8 * 3600,
                    same_site="strict", session_cookie="uap_session")
 
@@ -657,6 +659,18 @@ async def logout(request: Request):
 
 
 # ---------------------------------------------------------------- nastavení
+async def ua_health() -> dict:
+    """Stav napojení na UniFi Access – při starším než 60 s ověří lehkým dotazem."""
+    if ua.client and time.time() - ua.last_ok > 60:
+        try:
+            await asyncio.wait_for(ua.request("GET", "/users", params={"page_num": 1, "page_size": 1}), 10)
+        except Exception as e:  # noqa: BLE001
+            if not ua.last_error:
+                ua.last_error = getattr(e, "detail", None) or f"{type(e).__name__}"
+    age = int(time.time() - ua.last_ok) if ua.last_ok else None
+    return {"ua_ok": bool(ua.last_ok) and age is not None and age < 120 and not ua.last_error, "ua_ok_age": age}
+
+
 @app.get("/api/status")
 async def status(who: str = Depends(auth)):
     cfg = load_cfg()
@@ -665,6 +679,7 @@ async def status(who: str = Depends(auth)):
     base = {"user": who, "account_role": acc.get("role"), "see_all": bool(acc.get("see_all")),
             "site_name": cfg.get("site_name"),
             "roles": [r for r in mapped_roles(cfg) if r["group_id"] in allowed_role_ids(cfg, acc)]}
+    base.update(await ua_health())
     if acc.get("role") != "admin":
         return {**base, "wireguard": bool(wg), "tunnel_up": ua.tunnel.running,
                 **(ua.tunnel.stats() if wg else {}), "last_error": ua.last_error}
