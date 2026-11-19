@@ -21,4 +21,7 @@ USER app
 VOLUME ["/app/data", "/app/keys"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/login')" || exit 1
+ARG APP_VERSION=dev
+ARG APP_BUILD_DATE=
+ENV APP_VERSION=${APP_VERSION} APP_BUILD_DATE=${APP_BUILD_DATE}
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers"]

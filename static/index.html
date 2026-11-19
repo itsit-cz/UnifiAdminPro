@@ -15,7 +15,7 @@
     <button data-tab="audit">Audit změn</button>
     <button data-tab="settings">Nastavení</button>
   </nav>
-  <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="who" class="mute"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
+  <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="who" class="mute"></span><span id="ver" class="mute" style="font-size:12px"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
 </header>
 
 <main>
@@ -23,7 +23,7 @@
   <section id="tab-users">
     <div class="stats" id="stats"></div>
     <div class="bar">
-      <input id="q" placeholder="Hledat jméno, e-mail, číslo…" class="grow">
+      <input id="q" placeholder="Hledat jméno, e-mail, číslo, SPZ, kartu…" class="grow">
       <select id="fStatus">
         <option value="">Všechny stavy</option>
         <option value="ACTIVE">Aktivní</option>
@@ -85,6 +85,33 @@
       <ul class="steps" id="sSteps"></ul>
     </div>
     <div class="card form" style="max-width:720px">
+      <h2>Aktualizace</h2>
+      <div id="vInfo" class="hint"></div>
+      <div class="foot"><button class="btn" onclick="loadVersion(true)">Zkontrolovat</button>
+        <button class="btn primary" id="vRun" disabled onclick="runUpdate()">Aktualizovat nyní</button></div>
+      <label>Způsob aktualizace z webu</label>
+      <select id="vMethod">
+        <option value="none">Vypnuto</option>
+        <option value="portainer">Portainer API (přístupový token)</option>
+        <option value="webhook">Portainer webhook stacku</option>
+      </select>
+      <div id="vPortainer" class="hidden">
+        <label>Adresa Portaineru</label><input id="vUrl" placeholder="https://portainer.firma.cz:9443">
+        <div class="row2">
+          <div><label>Přístupový token</label><input id="vToken" type="password" placeholder="ponechat stávající"></div>
+          <div><label>ID stacku</label><input id="vStack" inputmode="numeric" placeholder="např. 12"></div>
+        </div>
+        <div class="hint">Token: Portainer → My account → Access tokens. ID stacku je číslo v adrese stacku (…/stacks/<b>12</b>?…).
+          Doporučení: samostatný uživatel v Portaineru jen s přístupem k tomuto prostředí.</div>
+      </div>
+      <div id="vWebhook" class="hidden">
+        <label>URL webhooku</label><input id="vHook" type="password" placeholder="https://portainer…/api/stacks/webhooks/…  (ponechat stávající)">
+        <div class="hint">Portainer → Stacks → stack → Editor → Webhooks (v Portainer CE nemusí být k dispozici – pak použijte API).</div>
+      </div>
+      <div class="foot"><button class="btn" onclick="saveUpdater()">Uložit a ověřit</button></div>
+      <div id="vMsg" class="hint"></div>
+    </div>
+    <div class="card form" style="max-width:720px">
       <h2>Změna hesla</h2>
       <label>Původní heslo</label><input id="pOld" type="password">
       <label>Nové heslo (min. 10 znaků)</label><input id="pNew" type="password">
@@ -117,6 +144,67 @@
   </form>
 </dialog>
 
+<!-- dialog: detail uživatele -->
+<dialog id="udlg" class="wide">
+  <form method="dialog" onsubmit="return false">
+    <div class="dhead"><h2 id="uTitle"></h2><span id="uStatus"></span><button class="btn sm" style="margin-left:auto" onclick="closeUser()">✕ Zavřít</button></div>
+
+    <section class="usec">
+      <h3>Údaje</h3>
+      <div class="row2">
+        <div><label>Jméno *</label><input id="uFirst"></div>
+        <div><label>Příjmení *</label><input id="uLast"></div>
+      </div>
+      <div class="row2">
+        <div><label>E-mail</label><input id="uEmail" type="email"></div>
+        <div><label>Osobní číslo</label><input id="uEmp"></div>
+      </div>
+      <div class="foot"><button class="btn primary sm" onclick="saveInfo()">Uložit údaje</button></div>
+    </section>
+
+    <section class="usec">
+      <h3>Přístupové politiky</h3>
+      <div class="checks" id="uPolicies"></div>
+      <div class="foot"><button class="btn primary sm" onclick="savePolicies()">Uložit politiky</button></div>
+    </section>
+
+    <section class="usec">
+      <h3>PIN</h3>
+      <div class="bar">
+        <span id="uPinState" class="grow"></span>
+        <input id="uPin" inputmode="numeric" placeholder="nový PIN (4–8 číslic)" style="width:200px">
+        <button class="btn sm" onclick="setPinU()">Nastavit</button>
+        <button class="btn sm danger" id="uPinDel" onclick="removePin()">Odebrat</button>
+      </div>
+    </section>
+
+    <section class="usec">
+      <h3>NFC karty</h3>
+      <table class="mini"><tbody id="uCards"></tbody></table>
+      <div class="bar" style="margin-top:10px">
+        <select id="uReader" class="grow"></select>
+        <button class="btn sm primary" id="uEnrollBtn" onclick="enroll()">💳 Načíst kartu ze čtečky</button>
+      </div>
+      <label class="inline"><input type="checkbox" id="uReset"> Resetovat kartu registrovanou na jiném místě</label>
+      <div id="uEnroll" class="hint"></div>
+      <details style="margin-top:8px"><summary class="mute">Zadat token karty ručně</summary>
+        <div class="bar" style="margin-top:6px"><input id="uCardToken" class="grow" placeholder="token karty">
+          <button class="btn sm" onclick="addCardManual()">Přidat</button></div>
+      </details>
+    </section>
+
+    <section class="usec">
+      <h3>SPZ (registrační značky)</h3>
+      <table class="mini"><tbody id="uPlates"></tbody></table>
+      <div class="bar" style="margin-top:10px">
+        <input id="uPlate" class="grow" placeholder="např. 1AB 2345" style="text-transform:uppercase">
+        <button class="btn sm" onclick="addPlate()">Přidat SPZ</button>
+      </div>
+      <div class="hint">Vyžaduje UniFi Access 3.3.10+ a kameru s rozpoznáváním SPZ.</div>
+    </section>
+  </form>
+</dialog>
+
 <div id="toast"></div>
 
 <script>
@@ -146,7 +234,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
   document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + b.dataset.tab));
   if (b.dataset.tab === 'audit') loadAudit();
-  if (b.dataset.tab === 'settings') loadSettings();
+  if (b.dataset.tab === 'settings') { loadSettings(); loadVersion(); loadUpdater(); }
   if (b.dataset.tab === 'logs' && !$('#logs').children.length) loadLogs();
 });
 
@@ -171,7 +259,8 @@ function renderUsers() {
   const list = USERS.filter(u =>
     (!st || u.status === st) &&
     (!pol || userPolicies(u).includes(pol)) &&
-    (!q || [fullName(u), u.user_email, u.employee_number].join(' ').toLowerCase().includes(q)));
+    (!q || [fullName(u), u.user_email, u.employee_number, ...(u.license_plates || []).map(p => p.credential),
+            ...(u.nfc_cards || []).map(c => c.id)].join(' ').toLowerCase().includes(q)));
 
   const cnt = s => USERS.filter(u => u.status === s).length;
   const noPol = USERS.filter(u => u.status === 'ACTIVE' && !userPolicies(u).length).length;
@@ -182,18 +271,18 @@ function renderUsers() {
     <div class="stat" title="Aktivní uživatelé bez přiřazené politiky"><span class="mute">Bez politiky ⚠</span><b>${noPol}</b></div>`;
 
   $('#users').innerHTML = list.map(u => {
-    const nfc = (u.nfc_cards || []).length, pin = u.pin_code && (u.pin_code.token || u.pin_code);
+    const nfc = (u.nfc_cards || []).length, pin = u.pin_code && (u.pin_code.token || u.pin_code),
+          lp = (u.license_plates || []).length;
     const active = u.status === 'ACTIVE';
     return `<tr>
-      <td><b>${esc(fullName(u))}</b></td>
+      <td><a href="#" onclick="openUser('${u.id}');return false"><b>${esc(fullName(u))}</b></a></td>
       <td>${esc(u.user_email) || '<span class="mute">—</span>'}</td>
       <td>${esc(u.employee_number) || '<span class="mute">—</span>'}</td>
       <td><span class="pill ${u.status}">${STATUS_CZ[u.status] || esc(u.status)}</span></td>
       <td>${(u.access_policies || []).map(p => `<span class="pill">${esc(p.name)}</span>`).join('') || '<span class="mute">žádná</span>'}</td>
-      <td class="mute">${nfc ? `💳 ${nfc}` : ''} ${pin ? '🔢 PIN' : ''}</td>
+      <td class="mute">${nfc ? `💳 ${nfc}` : ''} ${pin ? '🔢 PIN' : ''} ${lp ? `🚗 ${lp}` : ''}</td>
       <td class="act">
-        <button class="btn sm" onclick="openPolicies('${u.id}')">Politiky</button>
-        <button class="btn sm" onclick="setPin('${u.id}')">PIN</button>
+        <button class="btn sm" onclick="openUser('${u.id}')">Upravit</button>
         <button class="btn sm" onclick="toggleStatus('${u.id}','${active ? 'DEACTIVATED' : 'ACTIVE'}')">${active ? 'Deaktivovat' : 'Aktivovat'}</button>
         <button class="btn sm danger" onclick="delUser('${u.id}')">Smazat</button>
       </td></tr>`;
@@ -201,12 +290,12 @@ function renderUsers() {
 }
 ['#q', '#fStatus', '#fPolicy'].forEach(s => $(s).addEventListener('input', renderUsers));
 
-function policyChecks(selected = []) {
-  $('#fPolicies').innerHTML = POLICIES.map(p =>
+function policyChecks(selected = [], target = '#fPolicies') {
+  $(target).innerHTML = POLICIES.map(p =>
     `<label><input type="checkbox" value="${p.id}" ${selected.includes(p.id) ? 'checked' : ''}> ${esc(p.name)}</label>`
   ).join('') || '<span class="mute">Žádné politiky v UniFi Access</span>';
 }
-const checkedPolicies = () => [...document.querySelectorAll('#fPolicies input:checked')].map(i => i.value);
+const checkedPolicies = (target = '#fPolicies') => [...document.querySelectorAll(target + ' input:checked')].map(i => i.value);
 
 function openNew() {
   $('#dlgTitle').textContent = 'Nový uživatel';
@@ -225,23 +314,7 @@ function openNew() {
   dlg.showModal();
 }
 
-function openPolicies(id) {
-  const u = USERS.find(x => x.id === id);
-  $('#dlgTitle').textContent = 'Politiky – ' + fullName(u);
-  $('#dlgNewFields').classList.add('hidden');
-  policyChecks(userPolicies(u));
-  $('#dlgSave').onclick = () => run(async () => {
-    await api('PUT', `/api/users/${id}/policies`, {access_policy_ids: checkedPolicies()});
-    dlg.close(); await loadUsers();
-  }, 'Politiky uloženy');
-  dlg.showModal();
-}
 
-function setPin(id) {
-  const pin = prompt('Nový PIN (4–8 číslic):');
-  if (pin === null) return;
-  run(async () => { await api('PUT', `/api/users/${id}/pin`, {pin_code: pin.trim()}); await loadUsers(); }, 'PIN nastaven');
-}
 
 function toggleStatus(id, status) {
   const u = USERS.find(x => x.id === id);
@@ -338,8 +411,175 @@ async function changePw() {
   await run(async () => { await api('POST', '/api/settings/password', {old: $('#pOld').value, new: $('#pNew').value}); $('#pOld').value = $('#pNew').value = ''; }, 'Heslo změněno');
 }
 
+// ---------- detail uživatele
+let CUR = null, ENR = null, DEVICES = null;
+const udlg = $('#udlg');
+async function openUser(id) {
+  await run(async () => {
+    CUR = await api('GET', `/api/users/${id}`);
+    renderUser(); $('#uEnroll').textContent = ''; $('#uPin').value = ''; $('#uPlate').value = ''; $('#uCardToken').value = '';
+    udlg.showModal(); loadReaders();
+  });
+}
+async function reloadUser() { CUR = await api('GET', `/api/users/${CUR.id}`); renderUser(); loadUsers(); }
+function renderUser() {
+  const u = CUR;
+  $('#uTitle').textContent = fullName(u);
+  $('#uStatus').innerHTML = `<span class="pill ${u.status}">${STATUS_CZ[u.status] || esc(u.status)}</span>`;
+  $('#uFirst').value = u.first_name || ''; $('#uLast').value = u.last_name || '';
+  $('#uEmail').value = u.user_email || ''; $('#uEmp').value = u.employee_number || '';
+  policyChecks([...(u.access_policies || []).map(p => p.id), ...(u.access_policy_ids || [])], '#uPolicies');
+  const pin = u.pin_code && (u.pin_code.token || u.pin_code);
+  $('#uPinState').innerHTML = pin ? '🔢 PIN je nastaven' : '<span class="mute">PIN není nastaven</span>';
+  $('#uPinDel').disabled = !pin;
+  $('#uCards').innerHTML = (u.nfc_cards || []).map(c => `<tr><td>💳 <b>${esc(c.id)}</b></td>
+      <td class="mute">${esc(c.type || '')}</td>
+      <td class="act"><button class="btn sm danger" onclick="removeCard('${esc(c.token)}','${esc(c.id)}')">Odebrat</button></td></tr>`).join('')
+    || '<tr><td class="mute">Žádná karta</td></tr>';
+  $('#uPlates').innerHTML = (u.license_plates || []).map(p => `<tr><td>🚗 <b>${esc(p.credential)}</b></td>
+      <td class="mute">${p.credential_status === 'active' ? 'aktivní' : esc(p.credential_status || '')}</td>
+      <td class="act"><button class="btn sm danger" onclick="removePlate('${esc(p.id)}','${esc(p.credential)}')">Odebrat</button></td></tr>`).join('')
+    || '<tr><td class="mute">Žádná SPZ</td></tr>';
+}
+async function closeUser() { if (ENR) await cancelEnroll(); udlg.close(); }
+udlg.addEventListener('cancel', () => { if (ENR) cancelEnroll(); });
+
+const saveInfo = () => run(async () => {
+  await api('PUT', `/api/users/${CUR.id}`, {first_name: $('#uFirst').value, last_name: $('#uLast').value,
+    user_email: $('#uEmail').value, employee_number: $('#uEmp').value});
+  await reloadUser();
+}, 'Údaje uloženy');
+const savePolicies = () => run(async () => {
+  await api('PUT', `/api/users/${CUR.id}/policies`, {access_policy_ids: checkedPolicies('#uPolicies')}); await reloadUser();
+}, 'Politiky uloženy');
+const setPinU = () => run(async () => {
+  await api('PUT', `/api/users/${CUR.id}/pin`, {pin_code: $('#uPin').value.trim()}); $('#uPin').value = ''; await reloadUser();
+}, 'PIN nastaven');
+function removePin() {
+  if (!confirm('Odebrat PIN uživateli ' + fullName(CUR) + '?')) return;
+  run(async () => { await api('DELETE', `/api/users/${CUR.id}/pin`); await reloadUser(); }, 'PIN odebrán');
+}
+function removeCard(token, id) {
+  if (!confirm(`Odebrat kartu ${id} uživateli ${fullName(CUR)}?`)) return;
+  run(async () => { await api('POST', `/api/users/${CUR.id}/cards/remove`, {token}); await reloadUser(); }, 'Karta odebrána');
+}
+async function assignCard(token) {
+  try { await api('PUT', `/api/users/${CUR.id}/cards`, {token}); }
+  catch (e) {
+    if (!confirm(`Přiřazení karty selhalo:\n${e.message}\n\nPokud je karta přiřazena jinému uživateli, mám ji přeřadit?`)) throw e;
+    await api('PUT', `/api/users/${CUR.id}/cards`, {token, force_add: true});
+  }
+}
+const addCardManual = () => run(async () => {
+  const t = $('#uCardToken').value.trim(); if (!t) throw new Error('Zadejte token karty');
+  await assignCard(t); $('#uCardToken').value = ''; await reloadUser();
+}, 'Karta přiřazena');
+function removePlate(pid, plate) {
+  if (!confirm(`Odebrat SPZ ${plate}?`)) return;
+  run(async () => { await api('DELETE', `/api/users/${CUR.id}/plates/${encodeURIComponent(pid)}?plate=${encodeURIComponent(plate)}`); await reloadUser(); }, 'SPZ odebrána');
+}
+const addPlate = () => run(async () => {
+  const r = await api('POST', `/api/users/${CUR.id}/plates`, {plate: $('#uPlate').value});
+  $('#uPlate').value = ''; await reloadUser(); toast('SPZ ' + r.plate + ' přidána');
+});
+$('#uPlate').addEventListener('keydown', e => { if (e.key === 'Enter') addPlate(); });
+
+// ---------- načtení karty ze čtečky
+async function loadReaders() {
+  if (DEVICES === null) {
+    try { DEVICES = await api('GET', '/api/devices'); }
+    catch (e) { DEVICES = []; $('#uEnroll').textContent = 'Čtečky nelze načíst: ' + e.message; }
+  }
+  let last = null; try { last = localStorage.getItem('uap_reader'); } catch {}
+  $('#uReader').innerHTML = DEVICES.map(d => `<option value="${esc(d.id)}" ${d.id === last ? 'selected' : ''}>${esc(d.name)} (${esc(d.type)})</option>`).join('')
+    || '<option value="">Žádné zařízení</option>';
+}
+async function cancelEnroll() {
+  const sid = ENR; ENR = null;
+  $('#uEnrollBtn').textContent = '💳 Načíst kartu ze čtečky';
+  if (sid) try { await api('DELETE', `/api/enroll/${sid}`); } catch {}
+}
+async function enroll() {
+  if (ENR) { await cancelEnroll(); $('#uEnroll').textContent = 'Načítání zrušeno.'; return; }
+  const dev = $('#uReader').value;
+  if (!dev) return toast('Vyberte čtečku', false);
+  try { localStorage.setItem('uap_reader', dev); } catch {}
+  let sid;
+  try {
+    sid = (await api('POST', '/api/enroll', {device_id: dev, reset_ua_card: $('#uReset').checked})).session_id;
+  } catch (e) { return toast(e.message, false); }
+  ENR = sid; $('#uEnrollBtn').textContent = '✕ Zrušit načítání';
+  $('#uEnroll').textContent = '⏳ Přiložte kartu ke čtečce a držte ji alespoň 5 sekund…';
+  const t0 = Date.now();
+  try {
+    while (ENR === sid && Date.now() - t0 < 60000) {
+      await new Promise(r => setTimeout(r, 1500));
+      if (ENR !== sid) return;
+      const r = await api('GET', `/api/enroll/${sid}`);
+      if (r.done) {
+        await assignCard(r.token);
+        $('#uEnroll').textContent = `✅ Karta ${r.card_id || ''} přiřazena.`;
+        await cancelEnroll(); await reloadUser(); toast('Karta přiřazena'); return;
+      }
+    }
+    if (ENR === sid) { $('#uEnroll').textContent = '⌛ Čas vypršel – karta nebyla načtena.'; await cancelEnroll(); }
+  } catch (e) { $('#uEnroll').textContent = '❌ ' + e.message; await cancelEnroll(); }
+}
+
+// ---------- verze a aktualizace
+let VER = {};
+async function loadVersion(refresh = false) {
+  try { VER = await api('GET', '/api/version' + (refresh ? '?refresh=1' : '')); } catch { return; }
+  $('#ver').textContent = 'v' + VER.current + (VER.update_available ? ' · nová verze!' : '');
+  $('#ver').style.color = VER.update_available ? 'var(--blue)' : '';
+  const d = t => t ? new Date(t).toLocaleString('cs-CZ') : '';
+  $('#vInfo').innerHTML = `Nainstalováno: <b>${esc(VER.current)}</b> ${VER.build_date ? '(' + d(VER.build_date) + ')' : ''}<br>` +
+    (VER.latest ? `Nejnovější: <b>${esc(VER.latest)}</b> – ${esc(VER.latest_title || '')} (${d(VER.latest_date)})<br>` : 'Nejnovější verzi nelze zjistit.<br>') +
+    (VER.current === 'dev' ? 'Vývojová verze – aktualizace neprobíhá.' : !VER.latest ? '' :
+     VER.update_available ? '<b style="color:var(--blue)">Je k dispozici nová verze.</b>' : '✅ Máte aktuální verzi.');
+  $('#vRun').disabled = !(VER.update_available && VER.updater);
+  $('#vRun').title = VER.updater ? '' : 'Nejdřív nastavte způsob aktualizace';
+}
+async function loadUpdater() {
+  const u = await api('GET', '/api/update/config');
+  $('#vMethod').value = u.method; $('#vUrl').value = u.url || ''; $('#vStack').value = u.stack_id || '';
+  $('#vToken').value = ''; $('#vHook').value = '';
+  $('#vToken').placeholder = u.has_token ? 'ponechat stávající' : 'ptr_…';
+  $('#vMethod').onchange();
+}
+$('#vMethod').onchange = () => {
+  $('#vPortainer').classList.toggle('hidden', $('#vMethod').value !== 'portainer');
+  $('#vWebhook').classList.toggle('hidden', $('#vMethod').value !== 'webhook');
+};
+const saveUpdater = () => run(async () => {
+  $('#vMsg').textContent = 'Ověřuji…';
+  try {
+    const r = await api('POST', '/api/update/config', {method: $('#vMethod').value, url: $('#vUrl').value.trim(),
+      token: $('#vToken').value, stack_id: parseInt($('#vStack').value) || null, webhook: $('#vHook').value});
+    $('#vMsg').textContent = '✅ ' + r.info; await loadUpdater(); await loadVersion();
+  } catch (e) { $('#vMsg').textContent = '❌ ' + e.message; throw e; }
+}, 'Nastavení aktualizace uloženo');
+async function runUpdate() {
+  if (!confirm(`Aktualizovat z ${VER.current} na ${VER.latest}?\nAplikace bude cca 1 minutu nedostupná.`)) return;
+  await run(async () => {
+    const r = await api('POST', '/api/update/run');
+    $('#vRun').disabled = true;
+    $('#vInfo').innerHTML = '⏳ Aktualizace probíhá – stahuji nový image a restartuji kontejner…';
+    const t0 = Date.now();
+    while (Date.now() - t0 < 300000) {
+      await new Promise(res => setTimeout(res, 5000));
+      try {
+        const v = await (await fetch('/api/version?refresh=1')).json();
+        if (v.current && v.current !== r.from) { toast('Aktualizováno na ' + v.current); setTimeout(() => location.reload(), 1500); return; }
+      } catch {}
+    }
+    $('#vInfo').innerHTML = '⚠ Aktualizace se nepotvrdila do 5 minut – zkontrolujte stack v Portaineru a log kontejneru ([update]).';
+  });
+}
+
 loadStatus();
 loadUsers();
+loadVersion();
 </script>
 </body>
 </html>
