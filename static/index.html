@@ -12,6 +12,7 @@
   <nav id="modnav">
     <button data-mod="unifi" class="on">UniFi</button>
     <button data-mod="edookit" class="admin-only">Edookit</button>
+    <button data-mod="ad" class="admin-only">Active Directory</button>
     <button data-mod="settings">Nastavení</button>
   </nav>
   <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="uaok" class="badge"></span><span id="who" class="mute"></span><span id="ver" class="mute" style="font-size:12px"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
@@ -21,6 +22,8 @@
   <button data-mod="unifi" data-tab="logs">Průchody</button>
   <button data-mod="unifi" data-tab="audit" class="admin-only">Audit změn</button>
   <button data-mod="edookit" data-tab="students" class="hidden">Studenti</button>
+  <button data-mod="ad" data-tab="adstudents" class="hidden">Studenti</button>
+  <button data-mod="ad" data-tab="ademployees" class="hidden">Zaměstnanci</button>
 </nav>
 
 <main>
@@ -79,6 +82,34 @@
     </table>
   </section>
 
+  <!-- ACTIVE DIRECTORY -->
+  <section id="tab-adstudents" class="hidden">
+    <div class="bar">
+      <input id="adstudents-q" placeholder="Hledat jméno, login, e-mail, kartu…" class="grow">
+      <select id="adstudents-f"><option value="">Vše</option></select>
+      <label class="mute" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="adstudents-hide" checked> skrýt vyřazené</label>
+      <button class="btn primary" onclick="loadAd('students', true)">↻ Načíst z AD</button>
+    </div>
+    <div class="hint" id="adstudents-info" style="margin-bottom:8px"></div>
+    <table>
+      <thead><tr><th>Jméno</th><th>Login</th><th>E-mail</th><th>Třída</th><th>Karta</th><th>Edookit ID</th><th>Stav</th></tr></thead>
+      <tbody id="adstudents-rows"><tr><td colspan="7" class="mute">Klikněte na „Načíst z AD“.</td></tr></tbody>
+    </table>
+  </section>
+  <section id="tab-ademployees" class="hidden">
+    <div class="bar">
+      <input id="ademployees-q" placeholder="Hledat jméno, login, e-mail, kartu…" class="grow">
+      <select id="ademployees-f"><option value="">Vše</option></select>
+      <label class="mute" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="ademployees-hide" checked> jen aktivní</label>
+      <button class="btn primary" onclick="loadAd('employees', true)">↻ Načíst z AD</button>
+    </div>
+    <div class="hint" id="ademployees-info" style="margin-bottom:8px"></div>
+    <table>
+      <thead><tr><th>Jméno</th><th>Login</th><th>E-mail</th><th>Oddělení / pozice</th><th>Karta</th><th>Stav</th></tr></thead>
+      <tbody id="ademployees-rows"><tr><td colspan="7" class="mute">Klikněte na „Načíst z AD“.</td></tr></tbody>
+    </table>
+  </section>
+
   <!-- AUDIT -->
   <section id="tab-audit" class="hidden">
     <p class="mute">Změny provedené přes toto rozhraní (ukládá se lokálně na serveru).</p>
@@ -90,6 +121,34 @@
 
   <!-- NASTAVENÍ -->
   <section id="tab-settings" class="hidden">
+    <div class="card form admin-only" style="max-width:900px">
+      <h2>Active Directory</h2>
+      <div class="hint">Školní doména (on-premise AD). Čte se přes LDAP účtem jen pro čtení (stačí běžný doménový uživatel).
+        Je-li nastaven WireGuard, spojení na řadič domény vede přes tunel do školy.</div>
+      <div class="row2">
+        <div><label>Řadič domény (IP nebo název)</label><input id="adServer" placeholder="např. 172.30.0.10"></div>
+        <div class="row2">
+          <div><label>Zabezpečení</label><select id="adMode" style="width:100%"><option value="ldaps">LDAPS (636)</option><option value="starttls">StartTLS (389)</option><option value="plain">bez šifrování (389)</option></select></div>
+          <div><label>Port</label><input id="adPort" inputmode="numeric" placeholder="výchozí"></div>
+        </div>
+      </div>
+      <label class="inline" id="adTunBox" style="display:flex;gap:6px;align-items:center;font-weight:normal;margin-top:8px"><input type="checkbox" id="adTunnel" style="width:auto" checked> Připojovat přes WireGuard tunel do školy</label>
+      <div class="row2">
+        <div><label>Uživatel pro čtení</label><input id="adUser" autocomplete="off" placeholder="svc-syncpro@vossp.cze"></div>
+        <div><label>Heslo</label><input id="adPw" type="password" autocomplete="new-password"></div>
+      </div>
+      <label>OU studentů</label><input id="adStudents" list="adOuList">
+      <div class="row2">
+        <div><label>OU skupin tříd</label><input id="adClasses" list="adOuList"></div>
+        <div><label>OU vyřazených studentů (skrýt)</label><input id="adExclude" list="adOuList"></div>
+      </div>
+      <label>OU zaměstnanců</label>
+      <div class="bar"><input id="adEmployees" class="grow" list="adOuList" placeholder="např. OU=Staff,OU=Accounts,DC=vossp,DC=cze">
+        <button class="btn sm" onclick="adOus()">Načíst seznam OU</button></div>
+      <datalist id="adOuList"></datalist>
+      <div class="foot"><button class="btn" onclick="adTest()">Otestovat</button><button class="btn primary" onclick="adSave()">Uložit</button></div>
+      <ul class="steps" id="adSteps"></ul>
+    </div>
     <div class="card form admin-only" style="max-width:900px">
       <h2>Edookit</h2>
       <div class="hint">Stejné přístupy, jaké používal dosavadní synchronizační nástroj školy (proměnné <code>EDOOKIT_*</code> na jeho serveru).
@@ -331,7 +390,7 @@ async function run(fn, okMsg) {
 }
 
 // ---------- záložky
-const LAST_TAB = {unifi: 'users', edookit: 'students', settings: 'settings'};
+const LAST_TAB = {unifi: 'users', edookit: 'students', ad: 'adstudents', settings: 'settings'};
 function showTab(tab) {
   document.querySelectorAll('#subnav button').forEach(x => x.classList.toggle('on', x.dataset.tab === tab));
   document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + tab));
@@ -339,9 +398,12 @@ function showTab(tab) {
     document.querySelector(`#subnav button[data-tab="${tab}"]`)?.dataset.mod === m);
   if (mod) LAST_TAB[mod] = tab;
   if (tab === 'audit') loadAudit();
-  if (tab === 'settings' && isAdmin()) { loadSettings(); loadVersion(); loadUpdater(); loadGroups(); loadAccounts(); ekLoad(); }
+  if (tab === 'settings') (ST.account_role ? Promise.resolve() : loadStatus()).then(() => {
+    if (isAdmin()) { loadSettings(); loadVersion(); loadUpdater(); loadGroups(); loadAccounts(); ekLoad(); adLoadCfg(); } });
   if (tab === 'logs' && !$('#logs').children.length) loadLogs();
   if (tab === 'students' && !STUDENTS) loadStudents();
+  if (tab === 'adstudents' && !AD.students) loadAd('students');
+  if (tab === 'ademployees' && !AD.employees) loadAd('employees');
 }
 function showMod(mod) {
   document.querySelectorAll('#modnav button').forEach(x => x.classList.toggle('on', x.dataset.mod === mod));
@@ -911,6 +973,89 @@ async function openStudent(id) {
   });
 }
 ['#eq', '#eClass', '#eActive'].forEach(s => $(s).addEventListener('input', renderStudents));
+
+// ---------- Active Directory
+const AD = {students: null, employees: null};
+async function loadAd(kind, refresh = false) {
+  const info = $(`#ad${kind}-info`);
+  info.textContent = '⏳ Načítám z Active Directory…';
+  try {
+    const r = await api('GET', `/api/ad/users?kind=${kind}` + (refresh ? '&refresh=1' : ''));
+    AD[kind] = r.users.sort((a, b) => `${a.last_name || ''} ${a.first_name || ''}`.localeCompare(`${b.last_name || ''} ${b.first_name || ''}`, 'cs'));
+    const key = kind === 'students' ? 'class' : 'department';
+    const vals = [...new Set(AD[kind].flatMap(u => (u[key] || '').split(', ')).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'cs', {numeric: true}));
+    const f = $(`#ad${kind}-f`), cur = f.value;
+    f.innerHTML = `<option value="">${kind === 'students' ? 'Všechny třídy' : 'Všechna oddělení'}</option>` + vals.map(v => `<option ${v === cur ? 'selected' : ''}>${esc(v)}</option>`).join('');
+    info.textContent = `Načteno ${r.count} účtů z ${r.base} · ${new Date(r.loaded).toLocaleTimeString('cs-CZ')} · data se neukládají (jen dočasně v paměti).`;
+    renderAd(kind);
+  } catch (e) { info.textContent = '❌ ' + e.message; }
+}
+function renderAd(kind) {
+  const list0 = AD[kind]; if (!list0) return;
+  const q = $(`#ad${kind}-q`).value.toLowerCase(), f = $(`#ad${kind}-f`).value, hide = $(`#ad${kind}-hide`).checked;
+  const key = kind === 'students' ? 'class' : 'department';
+  const list = list0.filter(u => (!f || (u[key] || '').split(', ').includes(f)) &&
+    (!hide || (kind === 'students' ? !u.excluded_ou : u.enabled)) &&
+    (!q || [u.name, u.login, u.email, u.upn, u.card_ad, u.card_edookit, u.edookit_id, u.class, u.department, u.title].join(' ').toLowerCase().includes(q)));
+  const cols = kind === 'students' ? 7 : 6;
+  $(`#ad${kind}-rows`).innerHTML = list.slice(0, 1000).map((u, i) => `<tr class="click" onclick="openAd('${kind}', ${list0.indexOf(u)})">
+    <td><b>${esc(u.name)}</b></td><td class="mute">${esc(u.login)}</td>
+    <td>${esc(u.email || u.upn) || '<span class="mute">—</span>'}</td>
+    <td>${kind === 'students' ? (u.class ? `<span class="pill role">${esc(u.class)}</span>` : '<span class="mute">—</span>')
+         : esc([u.department, u.title].filter(Boolean).join(' · ')) || '<span class="mute">—</span>'}</td>
+    <td>${u.card_ad ? `💳 ${esc(u.card_edookit)} <span class="mute" title="hodnota v AD (otherPager)">(AD ${esc(u.card_ad)})</span>` : '<span class="mute">—</span>'}</td>
+    ${kind === 'students' ? `<td class="mute">${esc(u.edookit_id) || '—'}</td>` : ''}
+    <td>${u.excluded_ou ? '<span class="pill DEACTIVATED">vyřazen</span>' : u.enabled ? '<span class="pill ACTIVE">aktivní</span>' : '<span class="pill DEACTIVATED">zakázán</span>'}</td></tr>`).join('')
+    || `<tr><td colspan="${cols}" class="mute">Nic nenalezeno</td></tr>`;
+  if (list.length > 1000) $(`#ad${kind}-rows`).insertAdjacentHTML('beforeend', `<tr><td colspan="${cols}" class="mute">… a dalších ${list.length - 1000} – upřesněte hledání</td></tr>`);
+}
+['students', 'employees'].forEach(k => [`#ad${k}-q`, `#ad${k}-f`, `#ad${k}-hide`].forEach(s => $(s).addEventListener('input', () => renderAd(k))));
+async function openAd(kind, i) {
+  const u = AD[kind][i];
+  await run(async () => {
+    const d = await api('GET', '/api/ad/user?dn=' + encodeURIComponent(u.dn));
+    $('#sTitle').textContent = `${u.name} (${u.login})`;
+    const sm = d.summary;
+    $('#sBody').innerHTML = `<section class="usec"><h3>Přehled</h3>${kvTable({
+        'Login': sm.login, 'UPN': sm.upn, 'E-mail': sm.email, 'Třída': sm.class, 'Oddělení': sm.department, 'Pozice': sm.title,
+        'Karta (Edookit tvar)': sm.card_edookit, 'Karta v AD (otherPager)': sm.card_ad, 'Edookit ID': sm.edookit_id,
+        'Účet povolen': sm.enabled, 'Poslední přihlášení': sm.last_logon ? new Date(sm.last_logon).toLocaleString('cs-CZ') : null,
+        'Skupiny': sm.groups, 'Umístění (OU)': sm.ou})}</section>
+      <section class="usec"><h3>Všechny atributy z AD</h3>${kvTable(d.attributes)}</section>
+      <div class="hint">Hesla, hashe a citlivé atributy (např. identityHash) se nezobrazují.</div>`;
+    $('#sdlg').showModal();
+  });
+}
+let ADCFG = {};
+async function adLoadCfg() {
+  try { ADCFG = await api('GET', '/api/ad/config'); } catch { return; }
+  $('#adServer').value = ADCFG.server || ''; $('#adPort').value = ADCFG.port || ''; $('#adMode').value = ADCFG.mode || 'ldaps';
+  $('#adTunnel').checked = ADCFG.via_tunnel !== false; $('#adTunBox').style.display = ADCFG.wireguard ? 'flex' : 'none';
+  $('#adUser').value = ADCFG.bind_user || ''; $('#adPw').value = ''; $('#adPw').placeholder = ADCFG.has_password ? '•••••• (uloženo)' : '';
+  $('#adStudents').value = ADCFG.students_dn || ''; $('#adClasses').value = ADCFG.classes_dn || '';
+  $('#adExclude').value = ADCFG.exclude_dn || ''; $('#adEmployees').value = ADCFG.employees_dn || '';
+}
+const adSave = () => run(async () => {
+  const r = await api('POST', '/api/ad/config', {server: $('#adServer').value, port: parseInt($('#adPort').value) || null, mode: $('#adMode').value,
+    via_tunnel: $('#adTunnel').checked, bind_user: $('#adUser').value, bind_password: $('#adPw').value,
+    students_dn: $('#adStudents').value, classes_dn: $('#adClasses').value, exclude_dn: $('#adExclude').value, employees_dn: $('#adEmployees').value});
+  AD.students = AD.employees = null; await adLoadCfg();
+  if (r.tunnel_restarted) toast('Uloženo – WireGuard tunel restartován s přesměrováním na řadič domény');
+}, 'Active Directory uloženo');
+async function adTest() {
+  $('#adSteps').innerHTML = '<li class="mute">Testuji…</li>';
+  try {
+    const r = await api('POST', '/api/ad/test');
+    $('#adSteps').innerHTML = r.steps.map(s => `<li>${s.ok === null ? '➖' : s.ok ? '✅' : '❌'} ${esc(s.text)}</li>`).join('');
+  } catch (e) { $('#adSteps').innerHTML = '<li>❌ ' + esc(e.message) + '</li>'; }
+}
+async function adOus() {
+  await run(async () => {
+    const ous = await api('GET', '/api/ad/ous');
+    $('#adOuList').innerHTML = ous.map(o => `<option value="${esc(o)}">`).join('');
+    toast(`Načteno ${ous.length} OU – vyberte z nabídky v polích OU`);
+  });
+}
 
 (async () => { await loadStatus(); await loadUsers(); loadVersion(); })();
 </script>
