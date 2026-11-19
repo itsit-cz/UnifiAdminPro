@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UnifiAdminPro – instalace</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="narrow form">
+  <h1 style="font-size:22px">🔐 UnifiAdminPro – instalace</h1>
+  <p class="mute">Nastavení této instance. Vše lze později změnit v záložce Nastavení.</p>
+
+  <div class="card">
+    <h2>1. Instalační kód</h2>
+    <div class="hint">Šestimístný kód najdete v logu kontejneru (Portainer → Containers → Logs).</div>
+    <input id="code" inputmode="numeric" maxlength="6" placeholder="000000" style="margin-top:8px;font-size:18px;letter-spacing:4px">
+  </div>
+
+  <div class="card">
+    <h2>2. Lokalita a správce</h2>
+    <label>Název lokality</label><input id="site" placeholder="ZŠ Příkladová">
+    <div class="row2">
+      <div><label>Uživatelské jméno</label><input id="user" value="admin" autocomplete="username"></div>
+      <div><label>Heslo (min. 10 znaků)</label><input id="pw" type="password" autocomplete="new-password"></div>
+    </div>
+    <label>Heslo znovu</label><input id="pw2" type="password" autocomplete="new-password">
+  </div>
+
+  <div class="card">
+    <h2>3. Připojení k UniFi Access</h2>
+    <label>Adresa konzole</label><input id="host" placeholder="172.16.0.1:12445">
+    <div class="hint">IP konzole (UDM/UCG) ve školní síti. Port 12445 se doplní automaticky.</div>
+    <label>API token</label><input id="token" type="password">
+    <div class="hint">UniFi Access → Settings → General → Advanced → API Token. Oprávnění: uživatelé, politiky, dveře, systémový log.</div>
+    <label>Způsob spojení</label>
+    <select id="wgMode">
+      <option value="replace">Přes WireGuard VPN (konfigurace z UDM)</option>
+      <option value="none">Přímo (konzole je dostupná ze sítě serveru)</option>
+    </select>
+    <div id="wgBox">
+      <label>Konfigurace WireGuard klienta (.conf)</label>
+      <input type="file" accept=".conf,.txt" onchange="readConf(this)">
+      <textarea id="wg" placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = skola.example.cz:51820&#10;AllowedIPs = ..."></textarea>
+      <div class="hint">UDM → Settings → VPN → VPN Server → WireGuard → přidat klienta → stáhnout konfiguraci.</div>
+    </div>
+    <div class="foot"><button class="btn" onclick="test()">Otestovat připojení</button></div>
+    <ul class="steps" id="steps"></ul>
+  </div>
+
+  <div class="foot">
+    <button class="btn primary" id="finish" disabled onclick="finish()">Dokončit instalaci</button>
+  </div>
+  <div class="err" id="err"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let cert = null;
+function readConf(inp) { const f = inp.files[0]; if (f) f.text().then(t => $('#wg').value = t); }
+$('#wgMode').onchange = () => { $('#wgBox').classList.toggle('hidden', $('#wgMode').value !== 'replace'); $('#finish').disabled = true; };
+['#host', '#token', '#wg'].forEach(s => $(s).addEventListener('input', () => $('#finish').disabled = true));
+
+async function post(url, body) {
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || r.statusText);
+  return j;
+}
+const conn = () => ({setup_code: $('#code').value, ua_host: $('#host').value, ua_token: $('#token').value,
+                     wg_mode: $('#wgMode').value, wg_conf: $('#wg').value});
+
+async function test() {
+  $('#err').textContent = ''; $('#steps').innerHTML = '<li class="mute">Testuji připojení…</li>';
+  try {
+    const r = await post('/api/setup/test', conn());
+    cert = r.cert_sha256;
+    $('#steps').innerHTML = r.steps.map(s => `<li>${s.ok ? '✅' : '❌'} ${esc(s.text)}</li>`).join('') +
+      (r.ok ? `<li>👥 Uživatelů v UniFi Access: <b>${r.users_total ?? '?'}</b></li>
+               <li>🔒 Otisk certifikátu konzole (bude se ověřovat):<div class="fp">${esc(cert || 'nezjištěn')}</div></li>` : '');
+    $('#finish').disabled = !r.ok;
+  } catch (e) { $('#steps').innerHTML = ''; $('#err').textContent = e.message; }
+}
+
+async function finish() {
+  $('#err').textContent = '';
+  if ($('#pw').value !== $('#pw2').value) return $('#err').textContent = 'Hesla se neshodují';
+  if (!$('#site').value.trim()) return $('#err').textContent = 'Vyplňte název lokality';
+  try {
+    await post('/api/setup/complete', {...conn(), site_name: $('#site').value, admin_user: $('#user').value,
+                                       admin_password: $('#pw').value, cert_sha256: cert || ''});
+    location.href = '/';
+  } catch (e) { $('#err').textContent = e.message; }
+}
+</script>
+</body>
+</html>

@@ -4,57 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UniFi Access – správa uživatelů</title>
-<style>
-  :root { --bg:#f5f6f8; --card:#fff; --line:#e3e6eb; --txt:#1d2330; --mute:#6b7383;
-          --blue:#006fff; --red:#d93636; --green:#1a9a50; --amber:#c98a00; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--txt); }
-  header { background:var(--card); border-bottom:1px solid var(--line); padding:12px 24px; display:flex; align-items:center; gap:24px; }
-  header h1 { font-size:16px; margin:0; }
-  nav button { background:none; border:0; padding:8px 12px; font:inherit; color:var(--mute); cursor:pointer; border-radius:6px; }
-  nav button.on { color:var(--blue); background:#e8f1ff; font-weight:600; }
-  main { padding:20px 24px; max-width:1300px; margin:auto; }
-  .bar { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
-  .bar .grow { flex:1; }
-  input, select { font:inherit; padding:7px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
-  button.btn { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var(--line); background:#fff; cursor:pointer; }
-  button.primary { background:var(--blue); color:#fff; border-color:var(--blue); }
-  button.danger { color:var(--red); }
-  button.sm { padding:3px 8px; font-size:12px; }
-  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { background:#fafbfc; font-weight:600; color:var(--mute); font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
-  tr:last-child td { border-bottom:0; }
-  td.act { white-space:nowrap; text-align:right; }
-  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; background:#eef0f3; margin:1px 2px 1px 0; }
-  .ACTIVE { background:#e3f6ea; color:var(--green); }
-  .DEACTIVATED { background:#fde8e8; color:var(--red); }
-  .PENDING { background:#fff4d6; color:var(--amber); }
-  .mute { color:var(--mute); }
-  .stats { display:flex; gap:12px; margin-bottom:14px; }
-  .stat { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 16px; min-width:130px; }
-  .stat b { display:block; font-size:22px; }
-  dialog { border:0; border-radius:10px; padding:20px 22px; width:min(480px,95vw); box-shadow:0 10px 40px rgba(0,0,0,.2); }
-  dialog h2 { margin:0 0 14px; font-size:17px; }
-  dialog label { display:block; margin:10px 0 4px; font-weight:600; font-size:13px; }
-  dialog input { width:100%; }
-  .checks { max-height:180px; overflow:auto; border:1px solid var(--line); border-radius:6px; padding:6px 10px; }
-  .checks label { font-weight:normal; display:flex; gap:8px; margin:4px 0; }
-  .checks input { width:auto; }
-  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  .foot { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
-  #toast { position:fixed; bottom:20px; right:20px; padding:10px 16px; border-radius:8px; color:#fff; display:none; max-width:420px; }
-  .hidden { display:none; }
-</style>
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header>
-  <h1>🔐 UniFi Access</h1>
+  <h1>🔐 UnifiAdminPro</h1>
   <nav>
     <button data-tab="users" class="on">Uživatelé</button>
     <button data-tab="logs">Průchody</button>
     <button data-tab="audit">Audit změn</button>
+    <button data-tab="settings">Nastavení</button>
   </nav>
+  <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="who" class="mute"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
 </header>
 
 <main>
@@ -106,6 +67,30 @@
       <tbody id="audit"></tbody>
     </table>
   </section>
+
+  <!-- NASTAVENÍ -->
+  <section id="tab-settings" class="hidden">
+    <div class="card form" style="max-width:720px">
+      <h2>Připojení k UniFi Access</h2>
+      <label>Adresa konzole</label><input id="sHost" placeholder="172.16.0.1:12445">
+      <label>API token</label><input id="sToken" type="password" placeholder="ponechat stávající">
+      <label>WireGuard</label>
+      <select id="sWgMode"><option value="keep">Ponechat stávající konfiguraci</option>
+        <option value="replace">Nahrát novou konfiguraci</option><option value="remove">Bez WireGuard (přímé spojení)</option></select>
+      <div id="sWgBox" class="hidden"><label>Konfigurace z UDM (.conf)</label>
+        <input type="file" accept=".conf,.txt" onchange="readConf(this,'#sWg')"><textarea id="sWg" placeholder="[Interface]..."></textarea></div>
+      <div class="hint" id="sInfo"></div>
+      <div class="foot"><button class="btn" onclick="sTest()">Otestovat</button>
+        <button class="btn primary" id="sSave" disabled onclick="sSave()">Uložit</button></div>
+      <ul class="steps" id="sSteps"></ul>
+    </div>
+    <div class="card form" style="max-width:720px">
+      <h2>Změna hesla</h2>
+      <label>Původní heslo</label><input id="pOld" type="password">
+      <label>Nové heslo (min. 10 znaků)</label><input id="pNew" type="password">
+      <div class="foot"><button class="btn primary" onclick="changePw()">Změnit heslo</button></div>
+    </div>
+  </section>
 </main>
 
 <!-- dialog: nový uživatel / úprava politik -->
@@ -144,6 +129,7 @@ const dlg = $('#dlg');
 async function api(method, url, body) {
   const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: body && JSON.stringify(body)});
   const j = await r.json().catch(() => ({}));
+  if (r.status === 401 || r.status === 409) { location.href = '/'; throw new Error('Nepřihlášen'); }
   if (!r.ok) throw new Error(j.detail || r.statusText);
   return j;
 }
@@ -160,6 +146,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
   document.querySelectorAll('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + b.dataset.tab));
   if (b.dataset.tab === 'audit') loadAudit();
+  if (b.dataset.tab === 'settings') loadSettings();
   if (b.dataset.tab === 'logs' && !$('#logs').children.length) loadLogs();
 });
 
@@ -308,6 +295,48 @@ async function loadAudit() {
   });
 }
 
+// ---------- stav, nastavení
+let ST = {}, sCert = null;
+async function loadStatus() {
+  await run(async () => {
+    ST = await api('GET', '/api/status');
+    $('#site').textContent = ST.site_name || '';
+    $('#who').textContent = ST.user;
+    const ok = !ST.last_error && (!ST.wireguard || ST.tunnel_up);
+    $('#conn').textContent = ST.wireguard ? (ST.tunnel_up ? 'WG tunel ✓' : 'WG tunel ✗') : 'přímé spojení';
+    $('#conn').className = 'badge ' + (ok ? 'ACTIVE' : 'DEACTIVATED');
+    $('#conn').title = ST.last_error || '';
+  });
+}
+async function logout() { await fetch('/api/logout', {method:'POST'}); location.href = '/login'; }
+function readConf(inp, target) { const f = inp.files[0]; if (f) f.text().then(t => $(target).value = t); }
+$('#sWgMode').onchange = () => { $('#sWgBox').classList.toggle('hidden', $('#sWgMode').value !== 'replace'); $('#sSave').disabled = true; };
+function loadSettings() {
+  $('#sHost').value = (ST.ua_host || '').replace('https://', '');
+  $('#sToken').value = ''; $('#sWg').value = ''; $('#sSteps').innerHTML = ''; $('#sSave').disabled = true;
+  $('#sWgMode').value = ST.wireguard ? 'keep' : 'remove'; $('#sWgMode').onchange();
+  $('#sInfo').innerHTML = (ST.wireguard ? `WireGuard endpoint: <b>${esc(ST.wg_endpoint)}</b><br>` : '') +
+    `Otisk certifikátu konzole: <span class="fp">${esc(ST.cert_sha256 || '—')}</span>`;
+}
+const sBody = () => ({ua_host: $('#sHost').value, ua_token: $('#sToken').value, wg_mode: $('#sWgMode').value, wg_conf: $('#sWg').value});
+async function sTest() {
+  $('#sSteps').innerHTML = '<li class="mute">Testuji…</li>'; $('#sSave').disabled = true;
+  await run(async () => {
+    const r = await api('POST', '/api/settings/test', sBody());
+    sCert = r.cert_sha256;
+    $('#sSteps').innerHTML = r.steps.map(s => `<li>${s.ok ? '✅' : '❌'} ${esc(s.text)}</li>`).join('') +
+      (r.ok ? `<li>🔒 Otisk certifikátu: <span class="fp">${esc(sCert)}</span>${ST.cert_sha256 && ST.cert_sha256 !== sCert ? ' <b style="color:var(--red)">– liší se od uloženého!</b>' : ''}</li>` : '');
+    $('#sSave').disabled = !r.ok;
+  });
+}
+async function sSave() {
+  await run(async () => { await api('POST', '/api/settings/connection', {...sBody(), cert_sha256: sCert}); await loadStatus(); loadSettings(); await loadUsers(); }, 'Připojení uloženo');
+}
+async function changePw() {
+  await run(async () => { await api('POST', '/api/settings/password', {old: $('#pOld').value, new: $('#pNew').value}); $('#pOld').value = $('#pNew').value = ''; }, 'Heslo změněno');
+}
+
+loadStatus();
 loadUsers();
 </script>
 </body>
