@@ -55,6 +55,16 @@ Podpis API Docházka: `com.edookit.Client` = Code, `com.edookit.Time` = místní
 Nastavení → Edookit: adresa (`https://jahodovka.edookit.net`), přístupové údaje a **Otestovat endpointy**;
 zdroj studentů lze zvolit (výchozí osobní údaje, jinak API Docházka). Citlivé položky (rodné číslo, OP, pas, pojišťovna) se nezobrazují.
 
+## Active Directory
+Modul **Active Directory → Studenti / Zaměstnanci** čte účty ze školní domény (on-premise AD) přes LDAP(S) – jméno, login,
+e-mail, třída (skupina v OU tříd), oddělení/pozice, karta (`otherPager`, převedená do tvaru Edookitu), Edookit ID, stav.
+Kliknutím na účet se zobrazí všechny atributy (hesla, hashe a `identityHash` skryté). Data se neukládají.
+
+Nastavení → Active Directory: IP řadiče domény, LDAPS/StartTLS, účet jen pro čtení (běžný doménový uživatel),
+OU studentů, tříd, vyřazených a zaměstnanců (*Načíst seznam OU*), **Otestovat**. Je-li nastaven WireGuard, aplikace přidá
+do tunelu přesměrování `127.0.0.1:25347 → řadič:636`, takže AD ve škole je dostupné i z DC.
+Výchozí OU odpovídají dosavadnímu synchronizačnímu nástroji (`OU=Students,OU=Accounts,DC=vossp,DC=cze`).
+
 ## Role a účty
 1. V UniFi Access vytvořte skupiny uživatelů (např. Žáci, Učitelé) a přiřaďte jim přístupové politiky.
 2. Nastavení → **Role**: zaškrtněte skupiny, které se mají používat jako role, případně je přejmenujte.

@@ -118,7 +118,7 @@ WG_KEYS = {"interface": {"privatekey", "address", "dns", "mtu"},
            "peer": {"publickey", "presharedkey", "endpoint", "allowedips", "persistentkeepalive"}}
 
 
-def wireproxy_conf(text: str) -> str:
+def wireproxy_conf(text: str, tcp_tunnels: list[tuple[int, str]] | None = None) -> str:
     out, sec, seen, has_ka = [], None, set(), False
     for raw in text.splitlines():
         line = raw.split("#")[0].strip()
@@ -141,6 +141,8 @@ def wireproxy_conf(text: str) -> str:
     if not has_ka:
         out.append("PersistentKeepalive = 25")
     out += ["", "[http]", f"BindAddress = 127.0.0.1:{WG_PORT}"]
+    for port, target in tcp_tunnels or []:
+        out += ["", "[TCPClientTunnel]", f"BindAddress = 127.0.0.1:{port}", f"Target = {target}"]
     return "\n".join(out).strip() + "\n"
 
 
@@ -186,10 +188,10 @@ class Tunnel:
     def tail(self, n=6) -> str:
         return " | ".join(list(self.log)[-n:])
 
-    async def start(self, wg_text: str):
+    async def start(self, wg_text: str, tcp_tunnels: list[tuple[int, str]] | None = None):
         self.stop()
         self.log.clear()
-        self.conf = wireproxy_conf(wg_text)
+        self.conf = wireproxy_conf(wg_text, tcp_tunnels)
         self.path.write_text(self.conf)
         self.path.chmod(0o600)
         try:
@@ -248,11 +250,12 @@ class UAClient:
         self.last_error: str | None = None
         self.last_ok: float = 0.0
 
-    async def configure(self, host: str, token: str, wg_text: str | None, pin: str | None):
+    async def configure(self, host: str, token: str, wg_text: str | None, pin: str | None,
+                        tcp_tunnels: list[tuple[int, str]] | None = None):
         await self.close()
         proxy = None
         if wg_text:
-            await self.tunnel.start(wg_text)
+            await self.tunnel.start(wg_text, tcp_tunnels)
             proxy = f"http://127.0.0.1:{WG_PORT}"
         # self-signed certifikát konzole: ověřujeme otisk (pinning) místo CA
         self.client = httpx.AsyncClient(
@@ -337,12 +340,23 @@ class UAClient:
 ua = UAClient()
 
 
+AD_TUNNEL_PORT = WG_PORT + 2
+
+
+def ad_tunnels(cfg: dict) -> list[tuple[int, str]]:
+    """Přesměrování LDAP(S) na řadič domény ve škole přes WireGuard tunel."""
+    ad = cfg.get("ad") or {}
+    if ad.get("server") and cfg.get("wg_conf") and ad.get("via_tunnel", True):
+        return [(AD_TUNNEL_PORT, f"{ad['server']}:{ad.get('port') or (636 if ad.get('mode', 'ldaps') == 'ldaps' else 389)}")]
+    return []
+
+
 async def apply_saved():
     cfg = load_cfg()
     if cfg and cfg.get("ua_host"):
         try:
             await ua.configure(cfg["ua_host"], dec(cfg["ua_token"]), dec(cfg.get("wg_conf")),
-                               cfg.get("cert_sha256"))
+                               cfg.get("cert_sha256"), ad_tunnels(cfg))
         except Exception as e:  # noqa: BLE001
             ua.last_error = str(e)
 
@@ -659,14 +673,22 @@ async def logout(request: Request):
 
 
 # ---------------------------------------------------------------- nastavení
+_health_task: asyncio.Task | None = None
+
+
+async def _ua_check():
+    try:
+        await asyncio.wait_for(ua.request("GET", "/users", params={"page_num": 1, "page_size": 1}), 15)
+    except Exception as e:  # noqa: BLE001
+        if not ua.last_error:
+            ua.last_error = getattr(e, "detail", None) or f"{type(e).__name__}"
+
+
 async def ua_health() -> dict:
-    """Stav napojení na UniFi Access – při starším než 60 s ověří lehkým dotazem."""
-    if ua.client and time.time() - ua.last_ok > 60:
-        try:
-            await asyncio.wait_for(ua.request("GET", "/users", params={"page_num": 1, "page_size": 1}), 10)
-        except Exception as e:  # noqa: BLE001
-            if not ua.last_error:
-                ua.last_error = getattr(e, "detail", None) or f"{type(e).__name__}"
+    """Stav napojení na UniFi Access – při stáří > 60 s se ověří na pozadí (stav neblokuje)."""
+    global _health_task
+    if ua.client and time.time() - ua.last_ok > 60 and (_health_task is None or _health_task.done()):
+        _health_task = asyncio.get_running_loop().create_task(_ua_check())
     age = int(time.time() - ua.last_ok) if ua.last_ok else None
     return {"ua_ok": bool(ua.last_ok) and age is not None and age < 120 and not ua.last_error, "ua_ok_age": age}
 
@@ -1306,6 +1328,294 @@ async def ek_student(sid: str, _: str = Depends(admin)):
         {"title": "API Docházka – žák (/api/dochazka/v2/zaci)", "data": ek_scrub(z) if z else None},
         {"title": "API Docházka – třída (/api/dochazka/v2/tridy)", "data": t},
     ]}
+
+
+
+# ---------------------------------------------------------------- Active Directory (on-premise, LDAP)
+# Školní AD (např. vossp.cze). Čtení přes LDAP(S) účtem jen pro čtení; řadič domény je ve škole,
+# proto spojení vede přes WireGuard tunel (wireproxy TCPClientTunnel na 127.0.0.1:AD_TUNNEL_PORT).
+import ssl as _ssl
+import ldap3
+from ldap3.utils.conv import escape_filter_chars
+
+AD_HIDDEN = {"identityhash", "unicodepwd", "userpassword", "ntpwdhistory", "lmpwdhistory", "dbcspwd",
+             "supplementalcredentials", "msds-keycredentiallink", "msds-managedpassword", "msmcsadmpwd",
+             "ms-mcs-admpwd", "msds-supportedencryptiontypes"}
+AD_LIST_ATTRS = ["sAMAccountName", "userPrincipalName", "givenName", "sn", "displayName", "mail", "department",
+                 "title", "memberOf", "userAccountControl", "otherPager", "edookitPersonID", "employeeID",
+                 "employeeNumber", "whenCreated", "lastLogonTimestamp"]
+AD_DEFAULTS = {"students_dn": "OU=Students,OU=Accounts,DC=vossp,DC=cze",
+               "classes_dn": "OU=StudentsClasses,OU=Students,OU=Accounts,DC=vossp,DC=cze",
+               "employees_dn": "", "exclude_dn": "OU=DEL,OU=Students,OU=Accounts,DC=vossp,DC=cze", "mode": "ldaps"}
+_ad_cache: dict = {}
+
+
+class AdCfgIn(BaseModel):
+    server: str
+    port: int | None = None
+    mode: str = "ldaps"              # ldaps | starttls | plain
+    via_tunnel: bool = True
+    bind_user: str = ""
+    bind_password: str = ""
+    students_dn: str = ""
+    classes_dn: str = ""
+    employees_dn: str = ""
+    exclude_dn: str = ""             # např. OU=DEL (vyřazení) – volitelné vyloučení ze seznamu studentů
+
+
+def ad_cfg() -> dict:
+    return {**AD_DEFAULTS, **((load_cfg() or {}).get("ad") or {})}
+
+
+def ad_val(v):
+    if isinstance(v, (bytes, bytearray)):
+        try:
+            return v.decode("utf-8")
+        except UnicodeDecodeError:
+            return v.hex()
+    if isinstance(v, datetime):
+        return v.isoformat()
+    return v
+
+
+def ad_attrs(entry: dict) -> dict:
+    raw = entry.get("raw_attributes") or {}
+    out = {}
+    for k, vals in raw.items():
+        if k.lower() in AD_HIDDEN or not vals:
+            continue
+        if k.lower() == "objectguid" and vals:
+            import uuid as _uuid
+            out[k] = str(_uuid.UUID(bytes_le=bytes(vals[0])))
+            continue
+        if k.lower() == "objectsid" and vals:
+            b = bytes(vals[0])
+            try:
+                sub = [int.from_bytes(b[8 + 4 * i:12 + 4 * i], "little") for i in range(b[1])]
+                out[k] = f"S-{b[0]}-{int.from_bytes(b[2:8], 'big')}-" + "-".join(map(str, sub))
+            except Exception:  # noqa: BLE001
+                out[k] = b.hex()
+            continue
+        vv = [ad_val(x) for x in vals]
+        out[k] = vv[0] if len(vv) == 1 else vv
+    return out
+
+
+def ad_filetime(v) -> str | None:
+    try:
+        n = int(v)
+        if n <= 0 or n >= 0x7FFFFFFFFFFFFFFF:
+            return None
+        return datetime.fromtimestamp(n / 1e7 - 11644473600, timezone.utc).isoformat(timespec="seconds")
+    except (TypeError, ValueError):
+        return None
+
+
+def card_swap(v: str | None) -> str | None:
+    """Edookit ↔ AD otherPager: obrácené pořadí dvojic znaků (12345678 ↔ 78563412)."""
+    if not v:
+        return None
+    v = str(v)
+    pairs = [v[i:i + 2] for i in range(0, len(v), 2)]
+    return "".join(reversed(pairs))
+
+
+def ad_connect(c: dict | None = None) -> ldap3.Connection:
+    c = c or ad_cfg()
+    if not c.get("server"):
+        raise HTTPException(409, "Active Directory není nastaveno (Nastavení → Active Directory)")
+    mode = c.get("mode", "ldaps")
+    port = c.get("port") or (636 if mode == "ldaps" else 389)
+    host = c["server"]
+    tunneled = bool(ad_tunnels(load_cfg() or {}))
+    if tunneled:
+        host, port = "127.0.0.1", AD_TUNNEL_PORT
+    tls = ldap3.Tls(validate=_ssl.CERT_NONE) if mode in ("ldaps", "starttls") else None
+    server = ldap3.Server(host, port=port, use_ssl=(mode == "ldaps"), tls=tls, get_info=ldap3.NONE, connect_timeout=10)
+    conn = ldap3.Connection(server, user=c.get("bind_user") or None, password=dec(c.get("bind_password")) or None,
+                            authentication=ldap3.SIMPLE, receive_timeout=60, raise_exceptions=False, auto_referrals=False)
+    try:
+        if not conn.open():
+            raise HTTPException(502, f"Řadič domény nedostupný ({host}:{port}{' přes tunel' if tunneled else ''})")
+        if mode == "starttls" and not conn.start_tls():
+            raise HTTPException(502, f"StartTLS selhal: {conn.result.get('description')}")
+        if not conn.bind():
+            r = conn.result or {}
+            msg = r.get("message") or r.get("description")
+            hint = (" – zkontrolujte jméno (např. svc@vossp.cze) a heslo" if r.get("result") == 49 else
+                    " – řadič vyžaduje zabezpečené spojení, použijte LDAPS" if r.get("result") == 8 else "")
+            raise HTTPException(502, f"Přihlášení do AD selhalo: {msg}{hint}")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Spojení s AD selhalo: {type(e).__name__}: {e}")
+    return conn
+
+
+def ad_search(conn: ldap3.Connection, base: str, flt: str, attrs, scope=ldap3.SUBTREE) -> list[dict]:
+    res = conn.extend.standard.paged_search(base, flt, search_scope=scope, attributes=attrs, paged_size=500,
+                                            generator=False)
+    if conn.result and conn.result.get("result") not in (0, None):
+        raise HTTPException(502, f"Hledání v AD ({base}) selhalo: {conn.result.get('description')} {conn.result.get('message', '')}")
+    return [e for e in res if e.get("type") == "searchResEntry"]
+
+
+def ad_row(e: dict, classes_dn: str) -> dict:
+    a = ad_attrs(e)
+    lk = {k.lower(): v for k, v in a.items()}
+    groups = lk.get("memberof") or []
+    groups = [groups] if isinstance(groups, str) else groups
+    cn = lambda dn: dn.split(",", 1)[0].split("=", 1)[-1]
+    cls = [cn(g) for g in groups if classes_dn and g.lower().endswith(classes_dn.lower())]
+    uac = int(lk.get("useraccountcontrol") or 0)
+    dn = e.get("dn", "")
+    card = lk.get("otherpager")
+    card = (card[0] if card else None) if isinstance(card, list) else card
+    return {
+        "dn": dn, "login": lk.get("samaccountname"), "upn": lk.get("userprincipalname"),
+        "first_name": lk.get("givenname"), "last_name": lk.get("sn"),
+        "name": lk.get("displayname") or " ".join(x for x in (lk.get("givenname"), lk.get("sn")) if x),
+        "email": lk.get("mail"), "department": lk.get("department"), "title": lk.get("title"),
+        "class": ", ".join(cls) or None, "groups": [cn(g) for g in groups],
+        "card_ad": card, "card_edookit": card_swap(card), "edookit_id": lk.get("edookitpersonid"),
+        "enabled": not (uac & 2), "ou": dn.split(",", 1)[1] if "," in dn else "",
+        "last_logon": ad_filetime(lk.get("lastlogontimestamp")),
+    }
+
+
+@app.get("/api/ad/config")
+async def ad_config_get(_: str = Depends(admin)):
+    c = ad_cfg()
+    return {k: c.get(k) for k in ("server", "port", "mode", "via_tunnel", "bind_user", "students_dn", "classes_dn",
+                                  "employees_dn", "exclude_dn")} | {"has_password": bool(c.get("bind_password")),
+                                                                    "wireguard": bool((load_cfg() or {}).get("wg_conf"))}
+
+
+@app.post("/api/ad/config")
+async def ad_config_save(a: AdCfgIn, who: str = Depends(admin)):
+    cfg = load_cfg()
+    old = cfg.get("ad") or {}
+    if a.mode not in ("ldaps", "starttls", "plain"):
+        raise HTTPException(400, "Neplatný režim spojení")
+    new = {"server": a.server.strip(), "port": a.port or None, "mode": a.mode, "via_tunnel": a.via_tunnel,
+           "bind_user": a.bind_user.strip(), "students_dn": a.students_dn.strip(), "classes_dn": a.classes_dn.strip(),
+           "employees_dn": a.employees_dn.strip(), "exclude_dn": a.exclude_dn.strip(),
+           "bind_password": enc(a.bind_password) if a.bind_password else old.get("bind_password")}
+    tunnels_changed = ad_tunnels({**cfg, "ad": new}) != ad_tunnels(cfg)
+    cfg["ad"] = new
+    save_cfg(cfg)
+    _ad_cache.clear()
+    if tunnels_changed:
+        await apply_saved()          # restart tunelu s přesměrováním na řadič domény
+    audit(who, "ad_config", {"server": new["server"], "mode": a.mode, "tunnel": bool(ad_tunnels(cfg))})
+    return {"ok": True, "tunnel_restarted": tunnels_changed}
+
+
+@app.post("/api/ad/test")
+async def ad_test(_: str = Depends(admin)):
+    c = ad_cfg()
+
+    def run_test():
+        steps = []
+        conn = ad_connect(c)
+        steps.append({"ok": True, "text": f"Přihlášení jako {c.get('bind_user') or '(anonymně)'} proběhlo"})
+        conn.search("", "(objectClass=*)", search_scope=ldap3.BASE, attributes=["defaultNamingContext", "dnsHostName"])
+        if conn.entries:
+            info = ad_attrs(conn.response[0])
+            steps.append({"ok": True, "text": f"Řadič domény: {info.get('dnsHostName', '?')}, doména {info.get('defaultNamingContext', '?')}"})
+        for label, key in (("Studenti", "students_dn"), ("Třídy (skupiny)", "classes_dn"), ("Zaměstnanci", "employees_dn")):
+            base = c.get(key)
+            if not base:
+                steps.append({"ok": None, "text": f"{label}: OU není nastavena"})
+                continue
+            try:
+                flt = "(objectClass=group)" if key == "classes_dn" else "(&(objectCategory=person)(objectClass=user))"
+                n = len(ad_search(conn, base, flt, ["cn"]))
+                steps.append({"ok": True, "text": f"{label}: {n} objektů v {base}"})
+            except HTTPException as e:
+                steps.append({"ok": False, "text": f"{label}: {e.detail}"})
+        conn.unbind()
+        return steps
+
+    try:
+        steps = await asyncio.to_thread(run_test)
+    except HTTPException as e:
+        tun = ad_tunnels(load_cfg() or {})
+        return {"ok": False, "steps": [{"ok": False, "text": e.detail +
+                (" – ověřte IP řadiče a že VPN klienti na UDM smí na jeho port" if tun else "")}]}
+    return {"ok": all(x["ok"] is not False for x in steps), "steps": steps}
+
+
+@app.get("/api/ad/ous")
+async def ad_ous(_: str = Depends(admin)):
+    """Organizační jednotky domény – pro výběr OU studentů a zaměstnanců."""
+    def run():
+        conn = ad_connect()
+        conn.search("", "(objectClass=*)", search_scope=ldap3.BASE, attributes=["defaultNamingContext"])
+        base = ad_attrs(conn.response[0]).get("defaultNamingContext") if conn.response else None
+        if not base:
+            raise HTTPException(502, "Nelze zjistit kořen domény")
+        ous = ad_search(conn, base, "(objectClass=organizationalUnit)", ["ou"])
+        conn.unbind()
+        return sorted((e["dn"] for e in ous), key=lambda d: list(reversed(d.lower().split(","))))
+    return await asyncio.to_thread(run)
+
+
+@app.get("/api/ad/users")
+async def ad_users(kind: str = "students", refresh: bool = False, _: str = Depends(admin)):
+    if kind not in ("students", "employees"):
+        raise HTTPException(400, "kind musí být students nebo employees")
+    c = ad_cfg()
+    base = c.get("students_dn" if kind == "students" else "employees_dn")
+    if not base:
+        raise HTTPException(409, f"OU {'studentů' if kind == 'students' else 'zaměstnanců'} není nastavena "
+                                 "(Nastavení → Active Directory)")
+    hit = _ad_cache.get(kind)
+    if hit and not refresh and time.time() - hit["t"] < 300:
+        return hit["data"]
+
+    def run():
+        conn = ad_connect(c)
+        entries = ad_search(conn, base, "(&(objectCategory=person)(objectClass=user))", AD_LIST_ATTRS)
+        conn.unbind()
+        return entries
+
+    entries = await asyncio.to_thread(run)
+    excl = (c.get("exclude_dn") or "").lower()
+    rows = [ad_row(e, c.get("classes_dn", "")) for e in entries]
+    for r in rows:
+        r["excluded_ou"] = bool(excl and r["dn"].lower().endswith(excl))
+    data = {"count": len(rows), "base": base, "loaded": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "users": rows}
+    _ad_cache[kind] = {"t": time.time(), "data": data}
+    print(f"[ad] načteno {kind}: {len(rows)} z {base}", flush=True)
+    return data
+
+
+@app.get("/api/ad/user")
+async def ad_user(dn: str, _: str = Depends(admin)):
+    c = ad_cfg()
+    bases = [b.lower() for b in (c.get("students_dn"), c.get("employees_dn")) if b]
+    if not any(dn.lower().endswith(b) for b in bases):
+        raise HTTPException(403, "Uživatel je mimo nastavené OU")
+
+    def run():
+        conn = ad_connect(c)
+        conn.search(dn, "(objectClass=*)", search_scope=ldap3.BASE, attributes=[ldap3.ALL_ATTRIBUTES])
+        res = conn.response[0] if conn.response else None
+        conn.unbind()
+        return res
+
+    e = await asyncio.to_thread(run)
+    if not e or e.get("type") != "searchResEntry":
+        raise HTTPException(404, "Uživatel nenalezen")
+    a = ad_attrs(e)
+    for k in list(a):
+        if k.lower() in ("lastlogontimestamp", "lastlogon", "pwdlastset", "accountexpires", "badpasswordtime",
+                         "lastlogoff", "lockouttime"):
+            a[k] = ad_filetime(a[k]) or a[k]
+    row = ad_row(e, c.get("classes_dn", ""))
+    return {"dn": dn, "summary": row, "attributes": dict(sorted(a.items(), key=lambda kv: kv[0].lower()))}
 
 
 # ---------------------------------------------------------------- detail a úprava uživatele
