@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -1253,6 +1254,28 @@ async def ek_fetch_list(path: str, auth: str) -> list:
     return lst
 
 
+_S_GROUP = re.compile(r"^(?P<cls>.+?)\s*S(?P<n>\d+)$")
+
+
+def ad_group_name(name) -> str:
+    """Tvar jako v AD: bez teček a mezer (1.EK → 1EK)."""
+    return re.sub(r"[.\s]", "", str(name or ""))
+
+
+def schedule_group(klass, groups: list[str]) -> tuple[str | None, str | None]:
+    """Rozvrhová skupina: S skupina třídy (1.A S1 → 1A1), jinak celá třída (1.EK → 1EK).
+    Vrací (tvar pro AD, původní název v Edookitu)."""
+    sg = [(g, _S_GROUP.match(g)) for g in groups]
+    sg = [(g, m) for g, m in sg if m]
+    if sg:
+        own = [x for x in sg if klass and ad_group_name(x[1]["cls"]) == ad_group_name(klass)]
+        g, m = (own or sg)[0]
+        return ad_group_name(m["cls"]) + m["n"], g
+    if klass:
+        return ad_group_name(klass), str(klass)
+    return None, None
+
+
 async def ek_load(force: bool = False) -> dict:
     """Studenti = osobní údaje (aktuální studenti), doplnění z API Docházka (e-mail, karta, třída).
     Bez osobních údajů se použijí žáci z API Docházka. Drží se jen v paměti (5 min)."""
@@ -1329,8 +1352,9 @@ async def ek_load(force: bool = False) -> dict:
         if roc in (None, ""):
             first = next((x for x in [*groups, klass] if x and str(x)[0].isdigit()), None)
             roc = int(str(first)[0]) if first else None
+        sched, sched_src = schedule_group(klass, groups)
         return {
-            "groups": groups, "year": roc,
+            "groups": groups, "year": roc, "schedule_group": sched, "schedule_group_src": sched_src,
             "id": pid,
             "first_name": (p or {}).get("Firstname") or (z or {}).get("Jmeno"),
             "last_name": (p or {}).get("Lastname") or (z or {}).get("Prijmeni"),
