@@ -15,7 +15,7 @@
     <button data-mod="ad" class="admin-only">Active Directory</button>
     <button data-mod="settings">Nastavení</button>
   </nav>
-  <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="uaok" class="badge"></span><span id="who" class="mute"></span><span id="ver" class="mute" style="font-size:12px"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
+  <div class="right"><span id="site" class="mute"></span><span id="conn" class="badge"></span><span id="uaok" class="badge"></span><span id="ekok" class="badge hidden"></span><span id="adok" class="badge hidden"></span><span id="who" class="mute"></span><span id="ver" class="mute" style="font-size:12px"></span><button class="btn sm" onclick="logout()">Odhlásit</button></div>
 </header>
 <nav id="subnav" class="subnav">
   <button data-mod="unifi" data-tab="users" class="on">Uživatelé</button>
@@ -444,8 +444,8 @@ function toast(msg, ok = true) {
   t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ok ? 4000 : 15000);
   t.onclick = () => t.style.display = 'none';
 }
-async function run(fn, okMsg) {
-  try { await fn(); if (okMsg) toast(okMsg); } catch (e) { toast(e.message, false); }
+async function run(fn, okMsg, quiet) {
+  try { await fn(); if (okMsg) toast(okMsg); } catch (e) { if (!quiet) toast(e.message, false); }
 }
 
 // ---------- záložky
@@ -630,12 +630,23 @@ async function loadStatus() {
     $('#conn').textContent = ST.wireguard ? (wgOk ? 'WG tunel ✓' : (ST.tunnel_up ? 'WG bez handshaku' : 'WG neběží')) : 'přímé spojení';
     if (ST.wireguard) $('#conn').title = (ST.last_error ? ST.last_error + ' · ' : '') + (hs !== null ? `poslední handshake před ${hs} s` : 'handshake zatím neproběhl');
     $('#conn').className = 'badge ' + (ST.wireguard ? (wgOk ? 'ACTIVE' : 'DEACTIVATED') : 'ACTIVE');
-    $('#uaok').textContent = ST.ua_ok ? 'UniFi ✓' : 'UniFi ✗';
-    $('#uaok').className = 'badge ' + (ST.ua_ok ? 'ACTIVE' : 'DEACTIVATED');
-    $('#uaok').title = ST.ua_ok ? `UniFi Access odpovídá (před ${ST.ua_ok_age} s)` : (ST.last_error || 'UniFi Access neodpovídá');
-  });
+    const H = ST.health || {};
+    const badge = (sel, key, label, fallbackOk, fallbackMsg) => {
+      const h = H[key], el = $(sel);
+      if (h && !h.configured) { el.classList.add('hidden'); return; }
+      const ok = h ? h.ok : fallbackOk;
+      el.classList.remove('hidden');
+      el.textContent = label + (ok === null || ok === undefined ? ' …' : ok ? ' ✓' : ' ✗');
+      el.className = 'badge ' + (ok === null || ok === undefined ? '' : ok ? 'ACTIVE' : 'DEACTIVATED');
+      el.title = h ? `${h.msg}${h.ms != null ? ` · ${h.ms} ms` : ''} · ověřeno před ${h.age} s (každých ${ST.health_every} s)` : (fallbackMsg || '');
+    };
+    if (H.wg && H.wg.configured) badge('#conn', 'wg', 'WG tunel', wgOk);
+    badge('#uaok', 'ua', 'UniFi', ST.ua_ok, ST.last_error || 'UniFi Access');
+    if (H.ek) badge('#ekok', 'ek', 'Edookit'); else $('#ekok').classList.add('hidden');
+    if (H.ad) badge('#adok', 'ad', 'AD'); else $('#adok').classList.add('hidden');
+  }, null, true);
 }
-setInterval(() => { if (!document.hidden) loadStatus(); }, 60000);
+setInterval(() => { if (!document.hidden) loadStatus(); }, 10000);
 async function logout() { await fetch('/api/logout', {method:'POST'}); location.href = '/login'; }
 function readConf(inp, target) { const f = inp.files[0]; if (f) f.text().then(t => $(target).value = t); }
 $('#sWgMode').onchange = () => { $('#sWgBox').classList.toggle('hidden', $('#sWgMode').value !== 'replace'); $('#sSave').disabled = true; };

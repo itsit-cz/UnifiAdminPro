@@ -375,6 +375,7 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, max_age=8 * 360
 @app.on_event("startup")
 async def _startup():
     await apply_saved()
+    asyncio.get_running_loop().create_task(health_loop())
 
 
 @app.on_event("shutdown")
@@ -689,6 +690,102 @@ async def _ua_check():
             ua.last_error = getattr(e, "detail", None) or f"{type(e).__name__}"
 
 
+# Průběžná kontrola služeb (WG, UniFi, Edookit, AD) – každých 10 s, ale jen když je otevřená aplikace
+# (poslední /api/status do 60 s), aby se zbytečně nezatěžoval Edookit a řadič domény.
+HEALTH_EVERY = 10
+HEALTH: dict = {}
+_health_last_view = 0.0
+
+
+def _h(name: str, ok: bool | None, msg: str = "", t0: float | None = None, configured: bool = True):
+    HEALTH[name] = {"ok": ok, "configured": configured, "msg": msg, "checked": time.time(),
+                    "ms": int((time.monotonic() - t0) * 1000) if t0 else None}
+
+
+async def _check_wg():
+    cfg = load_cfg() or {}
+    if not cfg.get("wg_conf"):
+        return _h("wg", None, "přímé spojení bez WireGuardu", configured=False)
+    st = await asyncio.to_thread(ua.tunnel.stats) if ua.tunnel.running else {}
+    hs = st.get("handshake_age")
+    if not ua.tunnel.running:
+        return _h("wg", False, "tunel neběží")
+    if hs is None:
+        return _h("wg", False, "handshake zatím neproběhl")
+    _h("wg", hs < 300, f"poslední handshake před {hs} s")
+
+
+async def _check_ua():
+    if not ua.client:
+        return _h("ua", None, "UniFi Access není nastaven", configured=False)
+    t0 = time.monotonic()
+    try:
+        await asyncio.wait_for(ua.request("GET", "/users", params={"page_num": 1, "page_size": 1}), 9)
+        _h("ua", True, "UniFi Access odpovídá", t0)
+    except Exception as e:  # noqa: BLE001
+        _h("ua", False, str(getattr(e, "detail", None) or ua.last_error or type(e).__name__), t0)
+
+
+async def _check_ek():
+    c = ek_cfg()
+    if not c.get("url") or not (ek_has(c, "hmac") or ek_has(c, "basic")):
+        return _h("ek", None, "Edookit není nastaven", configured=False)
+    t0 = time.monotonic()
+    try:
+        if ek_has(c, "hmac"):   # malý endpoint (třídy, ~4 kB), ověří i podpis
+            r = await asyncio.wait_for(ek_request("/api/dochazka/v2/tridy", auth="hmac", timeout=9), 9)
+        else:
+            r = await asyncio.wait_for(ek_request("/api/student-data/v1/list", auth="basic", timeout=9), 9)
+        ok = r.status_code == 200
+        _h("ek", ok, "Edookit odpovídá" if ok else f"Edookit vrátil HTTP {r.status_code}", t0)
+    except Exception as e:  # noqa: BLE001
+        _h("ek", False, str(getattr(e, "detail", None) or f"{type(e).__name__}: {e}"), t0)
+
+
+def _ad_probe():
+    conn = ad_connect()
+    try:
+        conn.unbind()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _check_ad():
+    if not ad_cfg().get("server"):
+        return _h("ad", None, "Active Directory není nastaveno", configured=False)
+    t0 = time.monotonic()
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_ad_probe), 12)
+        _h("ad", True, "řadič domény odpovídá, přihlášení OK", t0)
+    except Exception as e:  # noqa: BLE001
+        _h("ad", False, str(getattr(e, "detail", None) or f"{type(e).__name__}: {e}"), t0)
+
+
+async def health_run():
+    await asyncio.gather(*(asyncio.wait_for(f(), 15) for f in (_check_wg, _check_ua, _check_ek, _check_ad)),
+                         return_exceptions=True)
+
+
+async def health_loop():
+    while True:
+        try:
+            if time.time() - _health_last_view < 60:
+                await health_run()
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+        await asyncio.sleep(HEALTH_EVERY)
+
+
+def health_public(admin_view: bool) -> dict:
+    now = time.time()
+    out = {}
+    for k, v in HEALTH.items():
+        age = int(now - v["checked"])
+        out[k] = {"ok": v["ok"] if age < HEALTH_EVERY * 4 else None, "configured": v["configured"], "age": age,
+                  "ms": v["ms"], "msg": v["msg"] if admin_view or v["ok"] else ("nedostupné" if v["configured"] else v["msg"])}
+    return out
+
+
 async def ua_health() -> dict:
     """Stav napojení na UniFi Access – při stáří > 60 s se ověří na pozadí (stav neblokuje)."""
     global _health_task
@@ -706,7 +803,14 @@ async def status(who: str = Depends(auth)):
     base = {"user": who, "account_role": acc.get("role"), "see_all": bool(acc.get("see_all")),
             "site_name": cfg.get("site_name"),
             "roles": [r for r in mapped_roles(cfg) if r["group_id"] in allowed_role_ids(cfg, acc)]}
+    global _health_last_view
+    first = time.time() - _health_last_view > 60
+    _health_last_view = time.time()
+    if first:      # aplikace se právě otevřela – zkontroluj hned
+        asyncio.get_running_loop().create_task(health_run())
     base.update(await ua_health())
+    base["health"] = health_public(acc.get("role") == "admin")
+    base["health_every"] = HEALTH_EVERY
     if acc.get("role") != "admin":
         return {**base, "wireguard": bool(wg), "tunnel_up": ua.tunnel.running,
                 **(ua.tunnel.stats() if wg else {}), "last_error": ua.last_error}
